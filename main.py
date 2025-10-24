@@ -5,14 +5,15 @@ app = FastAPI(title="MakeOver Backend")
 
 origins = [
     "http://localhost:3000",
-    "http://localhost:5173",
-    "https://make-over-one.vercel.app/",
-    "https://backendmakeover-production.up.railway.app/"  # Tambahkan domain backend sendiri
+    "http://localhost:5173", 
+    "https://make-over-one.vercel.app",  # Frontend Anda
+    "https://your-actual-project.up.railway.app"  # Domain Railway baru
 ]
 
+# ALLOW SEMUA ORIGINS DULU UNTUK TESTING
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Izinkan semua domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
