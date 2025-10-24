@@ -33,7 +33,10 @@ class PrecisionSkinTracker:
             "forehead": [10, 67, 69, 104, 108, 151, 337, 338, 297, 332, 284],
             "left_cheek": [117, 118, 119, 100, 47, 126, 209, 49, 131, 134, 51, 4, 5, 50],
             "right_cheek": [346, 347, 348, 329, 277, 355, 429, 279, 360, 363, 281, 4, 5, 280],
-            "nose_bridge": [168, 6, 197, 195, 5, 4, 1, 19, 94, 2, 98],
+            # PERBAIKAN: Tambah area hidung yang lebih komprehensif
+            "nose_bridge": [168, 6, 197, 195, 5, 4, 1, 19, 94, 2, 98, 129, 209, 49, 131],
+            "nose_sides": [114, 115, 116, 117, 118, 119, 100, 47, 126, 343, 344, 345, 346, 347, 348, 329],
+            "nose_tip": [1, 2, 3, 4, 5, 6, 19, 94, 97, 98, 129, 168, 197, 195, 196],
             "chin": [200, 201, 194, 204, 202, 212, 216, 206, 92, 165, 167, 164, 393],
             "jaw_left": [172, 136, 150, 149, 176, 148, 152, 377, 400, 378, 379, 365, 397],
             "jaw_right": [397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172],
@@ -54,6 +57,73 @@ class PrecisionSkinTracker:
         except Exception as e:
             logger.error(f"Error in face landmarks: {str(e)}")
             return None
+
+    def _enhance_nose_coverage(self, mask, landmarks, h, w):
+        """Enhance mask coverage around nose area for better foundation application"""
+        try:
+            # Define nose area landmarks lebih detail
+            nose_indices = [
+                # Bridge of nose
+                168, 6, 197, 195, 5, 4, 1, 19, 94, 2, 98,
+                # Sides of nose
+                114, 115, 116, 117, 118, 119, 343, 344, 345, 346, 347, 348,
+                # Nostrils and tip
+                129, 209, 49, 131, 134, 102, 64, 240, 97, 326, 327, 358, 429,
+                # Connection to cheeks
+                50, 280, 429, 420, 361, 277, 355, 371, 266
+            ]
+            
+            nose_points = []
+            for idx in nose_indices:
+                if idx < len(landmarks.landmark):
+                    landmark = landmarks.landmark[idx]
+                    x = int(landmark.x * w)
+                    y = int(landmark.y * h)
+                    nose_points.append([x, y])
+            
+            if len(nose_points) > 2:
+                # Create convex hull for nose area
+                nose_hull = cv2.convexHull(np.array(nose_points))
+                
+                # Fill the nose area
+                cv2.fillConvexPoly(mask, nose_hull, 255)
+                
+                # Expand slightly around nose for better coverage
+                nose_center = np.mean(nose_points, axis=0).astype(int)
+                expansion_radius = int(min(h, w) * 0.05)  # 5% of image dimension
+                
+                # Create circular expansion around nose
+                for point in nose_points:
+                    cv2.circle(mask, tuple(point), expansion_radius, 255, -1)
+                
+                # Connect nose to cheeks smoothly
+                left_cheek_point = None
+                right_cheek_point = None
+                
+                for idx in [117, 118, 119]:  # Left cheek points near nose
+                    if idx < len(landmarks.landmark):
+                        landmark = landmarks.landmark[idx]
+                        x = int(landmark.x * w)
+                        y = int(landmark.y * h)
+                        left_cheek_point = (x, y)
+                        break
+                
+                for idx in [346, 347, 348]:  # Right cheek points near nose
+                    if idx < len(landmarks.landmark):
+                        landmark = landmarks.landmark[idx]
+                        x = int(landmark.x * w)
+                        y = int(landmark.y * h)
+                        right_cheek_point = (x, y)
+                        break
+                
+                # Draw connecting lines if points are found
+                if left_cheek_point:
+                    cv2.line(mask, tuple(nose_center), left_cheek_point, 255, expansion_radius)
+                if right_cheek_point:
+                    cv2.line(mask, tuple(nose_center), right_cheek_point, 255, expansion_radius)
+                    
+        except Exception as e:
+            logger.error(f"Error enhancing nose coverage: {str(e)}")
 
     def create_comprehensive_skin_mask(self, image, landmarks):
         """Create mask that covers all skin areas including face and visible body"""
@@ -78,6 +148,9 @@ class PrecisionSkinTracker:
                 
                 # Fill the convex hull
                 cv2.fillConvexPoly(mask, hull, 255)
+                
+                # TAMBAHAN: Enhance nose area coverage
+                self._enhance_nose_coverage(mask, landmarks, h, w)
                 
                 # Expand mask to include neck and upper body
                 self._expand_mask_for_body(mask, landmarks, h, w)
@@ -135,19 +208,21 @@ class PrecisionSkinTracker:
             logger.error(f"Error expanding mask for body: {str(e)}")
 
     def _refine_mask_exclusions(self, mask, landmarks, h, w):
-        """Refine mask to exclude non-skin areas like eyes and lips"""
+        """Refine mask to exclude non-skin areas like eyes and lips, but preserve nose"""
         try:
-            # Define exclusion areas (eyes, lips, eyebrows)
+            # Define exclusion areas (eyes, lips, eyebrows) - TIDAK termasuk hidung
             exclusion_areas = []
             
             # Left eye
             left_eye_indices = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
             # Right eye  
             right_eye_indices = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
-            # Lips
+            # Lips (preserve area sekitar cupid's bow)
             lip_indices = [61, 146, 91, 181, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95]
+            # Eyebrows
+            eyebrow_indices = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46, 336, 296, 334, 293, 300, 276, 283, 282, 295, 285]
             
-            exclusion_indices = left_eye_indices + right_eye_indices + lip_indices
+            exclusion_indices = left_eye_indices + right_eye_indices + lip_indices + eyebrow_indices
             
             exclusion_points = []
             for idx in exclusion_indices:
@@ -161,8 +236,25 @@ class PrecisionSkinTracker:
                 # Create exclusion hulls for each feature
                 eye_lip_hull = cv2.convexHull(np.array(exclusion_points))
                 
-                # Subtract from mask
-                cv2.fillConvexPoly(mask, eye_lip_hull, 0)
+                # Subtract from mask, tapi preserve area hidung
+                temp_mask = mask.copy()
+                cv2.fillConvexPoly(temp_mask, eye_lip_hull, 0)
+                
+                # Pastikan area hidung tetap tercover
+                nose_indices = [168, 6, 197, 195, 5, 4, 1, 19, 94, 2, 98, 129, 209, 49, 131]
+                nose_points = []
+                for idx in nose_indices:
+                    if idx < len(landmarks.landmark):
+                        landmark = landmarks.landmark[idx]
+                        x = int(landmark.x * w)
+                        y = int(landmark.y * h)
+                        nose_points.append([x, y])
+                
+                if len(nose_points) > 2:
+                    nose_hull = cv2.convexHull(np.array(nose_points))
+                    cv2.fillConvexPoly(temp_mask, nose_hull, 255)
+                
+                mask = temp_mask
                 
         except Exception as e:
             logger.error(f"Error refining mask exclusions: {str(e)}")
@@ -370,7 +462,7 @@ class PrecisionSkinTracker:
                 
                 # Smart color adjustment that preserves texture
                 adjusted_channel = original_channel * color_ratio[c]
-                
+
                 # Blend with original using the mask
                 blended_channel = original_channel * (1 - mask[:, :, c]) + adjusted_channel * mask[:, :, c]
                 
