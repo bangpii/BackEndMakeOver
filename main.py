@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import cv2
 import numpy as np
 import base64
@@ -26,8 +27,11 @@ app.add_middleware(
 )
 
 # Create uploads directory if not exists
-UPLOADS_DIR = "user_uploads"
-os.makedirs(UPLOADS_DIR, exist_ok=True)
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Mount static files directory
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 # Store user sessions
 user_sessions = {}
@@ -61,9 +65,9 @@ SKIN_TONE_CATEGORIES = {
 }
 
 def save_uploaded_file(file_contents, filename):
-    """Save uploaded file to user_uploads directory"""
+    """Save uploaded file to uploads directory"""
     try:
-        file_path = os.path.join(UPLOADS_DIR, filename)
+        file_path = os.path.join(UPLOAD_DIR, filename)
         with open(file_path, 'wb') as f:
             f.write(file_contents)
         return file_path
@@ -291,6 +295,14 @@ async def analyze_skin(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Error in analyze-skin endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.get("/api/sessions")
+async def get_sessions():
+    """Debug endpoint to check active sessions"""
+    return {
+        "active_sessions": len(user_sessions),
+        "sessions": list(user_sessions.keys())
+    }
 
 if __name__ == "__main__":
     import uvicorn
