@@ -5,6 +5,9 @@ import cv2
 import numpy as np
 import base64
 import logging
+import os
+import uuid
+from datetime import datetime
 from skin_tracker import skin_tracker
 
 app = FastAPI(title="MakeOver Backend")
@@ -21,6 +24,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Create uploads directory if not exists
+UPLOADS_DIR = "user_uploads"
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+# Store user sessions
+user_sessions = {}
 
 # Skin tone categories
 SKIN_TONE_CATEGORIES = {
@@ -49,6 +59,22 @@ SKIN_TONE_CATEGORIES = {
         {"name": "Caramel", "hex": "#D9A25F", "rgb": (217, 162, 95)},
     ]
 }
+
+def save_uploaded_file(file_contents, filename):
+    """Save uploaded file to user_uploads directory"""
+    try:
+        file_path = os.path.join(UPLOADS_DIR, filename)
+        with open(file_path, 'wb') as f:
+            f.write(file_contents)
+        return file_path
+    except Exception as e:
+        logger.error(f"Error saving file: {str(e)}")
+        return None
+
+def image_to_base64(image):
+    """Convert OpenCV image to base64"""
+    _, buffer = cv2.imencode('.jpg', image)
+    return base64.b64encode(buffer).decode('utf-8')
 
 def find_best_matching_foundation(skin_tone_rgb):
     """Find the best matching foundation colors based on skin tone"""
@@ -96,11 +122,6 @@ def find_best_matching_foundation(skin_tone_rgb):
         "recommended_matches": recommended_matches[:4]
     }
 
-def image_to_base64(image):
-    """Convert OpenCV image to base64"""
-    _, buffer = cv2.imencode('.jpg', image)
-    return base64.b64encode(buffer).decode('utf-8')
-
 @app.get("/")
 def read_root():
     return {"message": "Backend is running!"}
@@ -108,6 +129,103 @@ def read_root():
 @app.get("/api/hello")
 def say_hello():
     return {"message": "Hello from FastAPI backend!"}
+
+@app.post("/api/upload-photo")
+async def upload_photo(file: UploadFile = File(...)):
+    try:
+        # Generate unique session ID
+        session_id = str(uuid.uuid4())
+        
+        # Read file contents
+        contents = await file.read()
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{session_id}_original{file_extension}"
+        
+        # Save original file
+        original_path = save_uploaded_file(contents, unique_filename)
+        
+        if not original_path:
+            raise HTTPException(status_code=500, detail="Failed to save file")
+        
+        # Decode image for processing
+        nparr = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        # Store user session
+        user_sessions[session_id] = {
+            "original_path": original_path,
+            "original_image_base64": image_to_base64(image),
+            "upload_time": datetime.now().isoformat()
+        }
+        
+        # Analyze skin tone
+        skin_tone, message = skin_tracker.analyze_skin_tone_advanced(image)
+        
+        foundation_matches = None
+        if skin_tone:
+            foundation_matches = find_best_matching_foundation(skin_tone)
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "message": "Photo uploaded successfully",
+            "skin_tone_rgb": skin_tone,
+            "skin_tone_hex": f"#{skin_tone[0]:02x}{skin_tone[1]:02x}{skin_tone[2]:02x}" if skin_tone else None,
+            "foundation_recommendations": foundation_matches,
+            "processed_image": f"data:image/jpeg;base64,{image_to_base64(image)}"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in upload-photo endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/api/apply-foundation")
+async def apply_foundation(file: UploadFile = File(...), foundation_hex: str = "#F9E6E6", session_id: str = None):
+    try:
+        # Read image file
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        # Apply foundation with natural blending
+        result_image, message = skin_tracker.apply_natural_skin_tone(image, foundation_hex)
+        
+        return {
+            "success": True,
+            "message": message,
+            "processed_image": f"data:image/jpeg;base64,{image_to_base64(result_image)}",
+            "applied_foundation": foundation_hex
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in apply-foundation endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/api/reset-to-original")
+async def reset_to_original(session_id: str):
+    try:
+        if session_id not in user_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        session_data = user_sessions[session_id]
+        
+        return {
+            "success": True,
+            "message": "Reset to original photo",
+            "processed_image": session_data["original_image_base64"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in reset-to-original endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/api/analyze-skin")
 async def analyze_skin(file: UploadFile = File(...)):
@@ -145,30 +263,29 @@ async def analyze_skin(file: UploadFile = File(...)):
         logger.error(f"Error in analyze-skin endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.post("/api/apply-foundation")
-async def apply_foundation(file: UploadFile = File(...), foundation_hex: str = "#F9E6E6"):
+# Cleanup old sessions (optional)
+def cleanup_old_sessions():
+    """Clean up sessions older than 1 hour"""
     try:
-        # Read image file
-        contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        current_time = datetime.now()
+        sessions_to_remove = []
         
-        if image is None:
-            raise HTTPException(status_code=400, detail="Invalid image file")
+        for session_id, session_data in user_sessions.items():
+            upload_time = datetime.fromisoformat(session_data["upload_time"])
+            if (current_time - upload_time).total_seconds() > 3600:  # 1 hour
+                sessions_to_remove.append(session_id)
         
-        # Apply foundation with natural blending
-        result_image, message = skin_tracker.apply_natural_skin_tone(image, foundation_hex)
-        
-        return {
-            "success": True,
-            "message": message,
-            "processed_image": f"data:image/jpeg;base64,{image_to_base64(result_image)}",
-            "applied_foundation": foundation_hex
-        }
+        for session_id in sessions_to_remove:
+            # Remove file from disk
+            if os.path.exists(user_sessions[session_id]["original_path"]):
+                os.remove(user_sessions[session_id]["original_path"])
+            # Remove from memory
+            del user_sessions[session_id]
+            
+        logger.info(f"Cleaned up {len(sessions_to_remove)} old sessions")
         
     except Exception as e:
-        logger.error(f"Error in apply-foundation endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"Error cleaning up sessions: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

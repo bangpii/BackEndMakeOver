@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import logging
+import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -10,11 +12,11 @@ class AdvancedSkinTracker:
         # Initialize MediaPipe Face Mesh for precise facial landmarks
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=False,
+            static_image_mode=True,  # Changed to True for better accuracy
             max_num_faces=1,
             refine_landmarks=True,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.7
+            min_detection_confidence=0.8,
+            min_tracking_confidence=0.8
         )
         
         # Initialize MediaPipe Face Detection as fallback
@@ -99,71 +101,96 @@ class AdvancedSkinTracker:
             logger.error(f"Error in face landmarks: {str(e)}")
             return None
 
-    def create_advanced_face_mask(self, image, landmarks):
-        """Create advanced face mask using precise landmarks"""
+    def create_smooth_face_mask(self, image, landmarks):
+        """Create smooth face mask without triangle artifacts"""
         h, w = image.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         
         try:
-            # Define comprehensive facial regions
+            # Define facial regions dengan points yang lebih natural
             landmark_points = []
             
-            # Full face contour (468 points in MediaPipe Face Mesh)
-            face_contour_indices = list(range(0, 17))  # Jawline
-            face_contour_indices.extend(list(range(17, 68)))  # Face oval
+            # Gunakan points yang lebih natural untuk contour wajah
+            # Face oval points (mengelilingi wajah)
+            face_oval_indices = [
+                10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+                397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+                172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+            ]
             
-            # Cheek areas dengan lebih banyak points
-            left_cheek_indices = [117, 118, 119, 100, 47, 126, 209, 49, 131, 134, 51, 5]
-            right_cheek_indices = [346, 347, 348, 329, 277, 355, 429, 279, 360, 363, 281, 5]
+            # Cheek areas untuk coverage yang lebih baik
+            cheek_indices = [
+                116, 117, 118, 119, 120, 121, 128, 188, 245, 193, 
+                346, 347, 348, 349, 350, 357, 377, 465, 422
+            ]
             
-            # Forehead dengan coverage lebih luas
-            forehead_indices = [10, 67, 69, 104, 108, 151, 337, 338, 297, 332, 284, 251, 301, 298]
-            
-            # Nose and mouth area (exclude untuk natural look)
-            exclude_indices = list(range(0, 11)) + list(range(13, 17))  # Exclude eyes, eyebrows
+            # Forehead area
+            forehead_indices = [67, 69, 104, 108, 151, 337, 338, 297, 332]
             
             # Combine all indices
-            all_indices = (face_contour_indices + 
-                         left_cheek_indices + 
-                         right_cheek_indices + 
-                         forehead_indices)
+            all_indices = list(set(face_oval_indices + cheek_indices + forehead_indices))
             
-            # Remove duplicates and excluded areas
-            all_indices = list(set(all_indices) - set(exclude_indices))
-            
+            # Collect points dengan smoothing
             for idx in all_indices:
                 if idx < len(landmarks.landmark):
                     landmark = landmarks.landmark[idx]
                     x = int(landmark.x * w)
                     y = int(landmark.y * h)
-                    # Add multiple points around each landmark untuk coverage lebih baik
-                    for dx in [-2, 0, 2]:
-                        for dy in [-2, 0, 2]:
-                            new_x = max(0, min(w-1, x + dx))
-                            new_y = max(0, min(h-1, y + dy))
-                            landmark_points.append([new_x, new_y])
+                    landmark_points.append([x, y])
             
             if len(landmark_points) > 2:
-                # Create convex hull for face area
+                # Create smooth contour dengan convex hull
                 hull = cv2.convexHull(np.array(landmark_points))
                 
-                # Fill dengan smooth edges
+                # Fill the convex hull
                 cv2.fillConvexPoly(mask, hull, 255)
                 
-                # Enhanced morphological operations
-                kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-                kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+                # Smooth the mask dengan morphological operations
+                kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+                kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
                 
+                # Open untuk remove noise kecil
                 mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+                
+                # Close untuk fill holes dan smooth edges
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
                 
                 # Advanced Gaussian blur untuk smooth transition
-                mask = cv2.GaussianBlur(mask, (31, 31), 5)
+                mask = cv2.GaussianBlur(mask, (25, 25), 8)
+                
+                # Ensure mask covers hair gaps dengan dilation ringan
+                kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                mask = cv2.dilate(mask, kernel_dilate, iterations=1)
                 
             return mask
             
         except Exception as e:
             logger.error(f"Error creating face mask: {str(e)}")
+            return mask
+
+    def enhance_hair_gap_coverage(self, mask, image):
+        """Enhance coverage for hair gaps and fine details"""
+        try:
+            # Convert to grayscale untuk edge detection
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Detect fine edges (hair gaps)
+            edges_fine = cv2.Canny(gray, 10, 30)
+            
+            # Dilate fine edges sedikit untuk menutup gap kecil
+            kernel_fine = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+            edges_dilated = cv2.dilate(edges_fine, kernel_fine, iterations=1)
+            
+            # Combine dengan original mask
+            enhanced_mask = cv2.bitwise_or(mask, edges_dilated)
+            
+            # Smooth the enhanced mask
+            enhanced_mask = cv2.GaussianBlur(enhanced_mask, (7, 7), 2)
+            
+            return enhanced_mask
+            
+        except Exception as e:
+            logger.error(f"Error enhancing hair gap coverage: {str(e)}")
             return mask
 
     def analyze_skin_tone_advanced(self, image):
@@ -175,7 +202,7 @@ class AdvancedSkinTracker:
             # Method 1: Face landmarks-based analysis
             landmarks = self.get_face_landmarks_precise(image)
             if landmarks:
-                face_mask = self.create_advanced_face_mask(image, landmarks)
+                face_mask = self.create_smooth_face_mask(image, landmarks)
                 if np.sum(face_mask) > 0:
                     skin_pixels = rgb_image[face_mask > 128]
                     if len(skin_pixels) > 0:
@@ -279,8 +306,8 @@ class AdvancedSkinTracker:
             logger.error(f"Error in fallback skin analysis: {str(e)}")
             return None, f"Analysis error: {str(e)}"
 
-    def apply_natural_skin_tone(self, image, foundation_hex):
-        """Apply foundation with natural blending like Instagram filters"""
+    def apply_natural_skin_tone(self, image, foundation_hex, original_image_path=None):
+        """Apply foundation with natural blending and enhanced coverage"""
         try:
             # Convert hex to RGB
             foundation_hex = foundation_hex.lstrip('#')
@@ -293,7 +320,9 @@ class AdvancedSkinTracker:
             # Get advanced skin mask
             landmarks = self.get_face_landmarks_precise(image)
             if landmarks:
-                face_mask = self.create_advanced_face_mask(image, landmarks)
+                face_mask = self.create_smooth_face_mask(image, landmarks)
+                # Enhance coverage for hair gaps
+                face_mask = self.enhance_hair_gap_coverage(face_mask, image)
             else:
                 # Fallback to skin detection
                 face_mask = self.detect_skin_protected(img_rgb)
@@ -311,28 +340,24 @@ class AdvancedSkinTracker:
                 target_value = target_rgb[c]
                 
                 # Natural blending dengan texture preservation
-                blend_strength = 0.65  # Optimal untuk natural look
+                blend_strength = 0.7  # Optimal untuk natural look
                 blended = original_channel * (1 - mask_float * blend_strength) + \
                          target_value * mask_float * blend_strength
                 
                 # Maintain original texture details
                 original_detail = original_channel - cv2.GaussianBlur(original_channel, (0, 0), 1)
-                blended = blended + original_detail * 0.4
+                blended = blended + original_detail * 0.3
                 
                 result[:, :, c] = np.clip(blended, 0, 255)
             
             # Final smoothing untuk natural look
-            result = cv2.GaussianBlur(result, (0, 0), 0.8)
+            result = cv2.GaussianBlur(result, (0, 0), 0.5)  # Reduced blur
             result_uint8 = result.astype(np.uint8)
-            
-            # Soft glow effect untuk hasil yang lebih natural
-            glow = cv2.GaussianBlur(result_uint8, (0, 0), 1.5)
-            result_uint8 = cv2.addWeighted(result_uint8, 0.8, glow, 0.2, 0)
             
             # Convert back to BGR
             result_bgr = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2BGR)
             
-            return result_bgr, "Foundation applied naturally"
+            return result_bgr, "Foundation applied naturally with enhanced coverage"
             
         except Exception as e:
             logger.error(f"Error applying natural skin tone: {str(e)}")
