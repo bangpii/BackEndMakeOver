@@ -78,7 +78,13 @@ def save_uploaded_file(file_contents, filename):
 def image_to_base64(image):
     """Convert OpenCV image to base64"""
     try:
-        _, buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        # Ensure image is in correct format
+        if image.dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+        
+        # Encode with good quality
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+        _, buffer = cv2.imencode('.jpg', image, encode_param)
         return base64.b64encode(buffer).decode('utf-8')
     except Exception as e:
         logger.error(f"Error converting image to base64: {str(e)}")
@@ -168,10 +174,15 @@ async def upload_photo(file: UploadFile = File(...)):
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Store user session
+        # Store user session with proper image data
+        original_base64 = image_to_base64(image)
+        if not original_base64:
+            raise HTTPException(status_code=500, detail="Failed to process image")
+        
         user_sessions[session_id] = {
             "original_path": original_path,
-            "original_image_base64": image_to_base64(image),
+            "original_image_base64": original_base64,
+            "original_image": image.copy(),  # Store the actual image array
             "upload_time": datetime.now().isoformat()
         }
         
@@ -189,7 +200,7 @@ async def upload_photo(file: UploadFile = File(...)):
             "skin_tone_rgb": skin_tone,
             "skin_tone_hex": f"#{skin_tone[0]:02x}{skin_tone[1]:02x}{skin_tone[2]:02x}" if skin_tone else None,
             "foundation_recommendations": foundation_matches,
-            "processed_image": f"data:image/jpeg;base64,{image_to_base64(image)}"
+            "processed_image": f"data:image/jpeg;base64,{original_base64}"
         }
         
     except Exception as e:
@@ -242,10 +253,16 @@ async def reset_to_original(session_id: str = Form(...)):
         
         session_data = user_sessions[session_id]
         
+        # Get the original image base64 from session
+        original_base64 = session_data["original_image_base64"]
+        
+        if not original_base64:
+            raise HTTPException(status_code=500, detail="Original image not available")
+        
         return {
             "success": True,
             "message": "Reset to original photo",
-            "processed_image": session_data["original_image_base64"]
+            "processed_image": f"data:image/jpeg;base64,{original_base64}"
         }
         
     except Exception as e:
@@ -273,7 +290,7 @@ async def analyze_skin(file: UploadFile = File(...)):
         if skin_tone is None:
             return JSONResponse(
                 status_code=400,
-                content={"error": message}
+                content={"success": False, "error": message}
             )
         
         # Find matching foundation
