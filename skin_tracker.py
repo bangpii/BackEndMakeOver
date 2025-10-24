@@ -5,7 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class SkinTracker:
+class AdvancedSkinTracker:
     def __init__(self):
         # Initialize MediaPipe Face Mesh for precise facial landmarks
         self.mp_face_mesh = mp.solutions.face_mesh
@@ -13,19 +13,80 @@ class SkinTracker:
             static_image_mode=False,
             max_num_faces=1,
             refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
         )
         
         # Initialize MediaPipe Face Detection as fallback
         self.mp_face_detection = mp.solutions.face_detection
         self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=1,  # More accurate model
+            model_selection=1,
             min_detection_confidence=0.7
         )
 
-    def get_face_landmarks(self, image):
-        """Get precise facial landmarks using MediaPipe Face Mesh"""
+    def detect_skin_protected(self, img_rgb):
+        """Advanced skin detection with protection for sensitive areas"""
+        try:
+            # Method 1: YCrCb dengan range yang lebih akurat
+            img_ycrcb = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2YCrCb)
+            lower_ycrcb = np.array([0, 133, 77], dtype=np.uint8)
+            upper_ycrcb = np.array([255, 173, 127], dtype=np.uint8)
+            mask_ycrcb = cv2.inRange(img_ycrcb, lower_ycrcb, upper_ycrcb)
+            
+            # Method 2: HSV dengan range yang lebih natural
+            img_hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
+            lower_hsv = np.array([0, 20, 40], dtype=np.uint8)
+            upper_hsv = np.array([25, 160, 245], dtype=np.uint8)
+            mask_hsv = cv2.inRange(img_hsv, lower_hsv, upper_hsv)
+            
+            # Method 3: RGB rules yang lebih selektif
+            r, g, b = cv2.split(img_rgb)
+            mask_rgb = ((r > 80) & (g > 40) & (b > 20) & 
+                        ((cv2.max(r, cv2.max(g, b)) - cv2.min(r, cv2.min(g, b))) > 20) & 
+                        (np.abs(r - g) > 10) & (r > g) & (r > b)).astype(np.uint8) * 255
+            
+            # Combine masks dengan priority
+            combined_mask = cv2.bitwise_and(mask_ycrcb, mask_hsv)
+            combined_mask = cv2.bitwise_or(combined_mask, mask_rgb)
+            
+            # Remove small noise
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+            
+            return combined_mask
+            
+        except Exception as e:
+            logger.error(f"Error in skin detection: {str(e)}")
+            return np.zeros(img_rgb.shape[:2], dtype=np.uint8)
+
+    def refine_mask_advanced(self, mask, img_rgb):
+        """Refine mask with advanced edge-aware processing"""
+        try:
+            # Gaussian blur untuk edges yang sangat halus
+            mask = cv2.GaussianBlur(mask, (9, 9), 2)
+            
+            # Normalize mask untuk soft transition
+            mask_float = mask.astype(float) / 255.0
+            
+            # Create edge-aware mask
+            edges = cv2.Canny(img_rgb, 50, 150)
+            edges = cv2.dilate(edges, None, iterations=1)
+            edges_mask = (edges == 0).astype(float)
+            
+            # Combine dengan edge protection
+            mask_float = mask_float * edges_mask
+            
+            # Soft threshold untuk natural look
+            mask_float = np.clip(mask_float * 1.1, 0, 0.95)
+            
+            return (mask_float * 255).astype(np.uint8)
+            
+        except Exception as e:
+            logger.error(f"Error refining mask: {str(e)}")
+            return mask
+
+    def get_face_landmarks_precise(self, image):
+        """Get precise facial landmarks with enhanced accuracy"""
         try:
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = self.face_mesh.process(rgb_image)
@@ -38,44 +99,66 @@ class SkinTracker:
             logger.error(f"Error in face landmarks: {str(e)}")
             return None
 
-    def create_precise_face_mask(self, image, landmarks):
-        """Create precise face mask using facial landmarks"""
+    def create_advanced_face_mask(self, image, landmarks):
+        """Create advanced face mask using precise landmarks"""
         h, w = image.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         
         try:
-            # Define face regions using landmarks
+            # Define comprehensive facial regions
             landmark_points = []
             
-            # Cheek areas (more precise)
-            left_cheek_indices = [116, 117, 118, 119, 120, 121, 128, 188, 245, 193, 55, 8]
-            right_cheek_indices = [345, 346, 347, 348, 349, 350, 357, 377, 465, 422, 285, 8]
+            # Full face contour (468 points in MediaPipe Face Mesh)
+            face_contour_indices = list(range(0, 17))  # Jawline
+            face_contour_indices.extend(list(range(17, 68)))  # Face oval
             
-            # Forehead area
-            forehead_indices = [10, 67, 69, 104, 108, 151, 337, 338, 297, 332, 284, 251]
+            # Cheek areas dengan lebih banyak points
+            left_cheek_indices = [117, 118, 119, 100, 47, 126, 209, 49, 131, 134, 51, 5]
+            right_cheek_indices = [346, 347, 348, 329, 277, 355, 429, 279, 360, 363, 281, 5]
             
-            # Jawline and face contour
-            face_contour_indices = list(range(10, 30)) + list(range(50, 70)) + list(range(100, 120))
+            # Forehead dengan coverage lebih luas
+            forehead_indices = [10, 67, 69, 104, 108, 151, 337, 338, 297, 332, 284, 251, 301, 298]
+            
+            # Nose and mouth area (exclude untuk natural look)
+            exclude_indices = list(range(0, 11)) + list(range(13, 17))  # Exclude eyes, eyebrows
             
             # Combine all indices
-            all_indices = left_cheek_indices + right_cheek_indices + forehead_indices + face_contour_indices
+            all_indices = (face_contour_indices + 
+                         left_cheek_indices + 
+                         right_cheek_indices + 
+                         forehead_indices)
+            
+            # Remove duplicates and excluded areas
+            all_indices = list(set(all_indices) - set(exclude_indices))
             
             for idx in all_indices:
                 if idx < len(landmarks.landmark):
                     landmark = landmarks.landmark[idx]
                     x = int(landmark.x * w)
                     y = int(landmark.y * h)
-                    landmark_points.append([x, y])
+                    # Add multiple points around each landmark untuk coverage lebih baik
+                    for dx in [-2, 0, 2]:
+                        for dy in [-2, 0, 2]:
+                            new_x = max(0, min(w-1, x + dx))
+                            new_y = max(0, min(h-1, y + dy))
+                            landmark_points.append([new_x, new_y])
             
             if len(landmark_points) > 2:
                 # Create convex hull for face area
                 hull = cv2.convexHull(np.array(landmark_points))
+                
+                # Fill dengan smooth edges
                 cv2.fillConvexPoly(mask, hull, 255)
                 
-                # Apply morphological operations to smooth the mask
-                kernel = np.ones((15, 15), np.uint8)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-                mask = cv2.GaussianBlur(mask, (25, 25), 0)
+                # Enhanced morphological operations
+                kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+                
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+                
+                # Advanced Gaussian blur untuk smooth transition
+                mask = cv2.GaussianBlur(mask, (31, 31), 5)
                 
             return mask
             
@@ -83,51 +166,53 @@ class SkinTracker:
             logger.error(f"Error creating face mask: {str(e)}")
             return mask
 
-    def analyze_skin_tone_precise(self, image):
-        """Analyze skin tone with precise facial region detection"""
+    def analyze_skin_tone_advanced(self, image):
+        """Advanced skin tone analysis with multiple methods"""
         try:
-            landmarks = self.get_face_landmarks(image)
+            # Convert to RGB for processing
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
-            if landmarks is None:
-                # Fallback to face detection
-                return self.analyze_skin_tone_fallback(image)
+            # Method 1: Face landmarks-based analysis
+            landmarks = self.get_face_landmarks_precise(image)
+            if landmarks:
+                face_mask = self.create_advanced_face_mask(image, landmarks)
+                if np.sum(face_mask) > 0:
+                    skin_pixels = rgb_image[face_mask > 128]
+                    if len(skin_pixels) > 0:
+                        # Advanced color analysis dengan outlier removal
+                        skin_samples = skin_pixels.reshape(-1, 3)
+                        
+                        # Remove extreme outliers
+                        lower_percentile = np.percentile(skin_samples, 2, axis=0)
+                        upper_percentile = np.percentile(skin_samples, 98, axis=0)
+                        
+                        mask = np.all((skin_samples >= lower_percentile) & 
+                                    (skin_samples <= upper_percentile), axis=1)
+                        filtered_skin = skin_samples[mask]
+                        
+                        if len(filtered_skin) > 0:
+                            avg_skin_tone = np.median(filtered_skin, axis=0).astype(int)
+                            return avg_skin_tone.tolist(), "Skin tone analyzed precisely"
             
-            # Create precise face mask
-            face_mask = self.create_precise_face_mask(image, landmarks)
+            # Method 2: Advanced skin detection fallback
+            skin_mask = self.detect_skin_protected(rgb_image)
+            refined_mask = self.refine_mask_advanced(skin_mask, rgb_image)
             
-            if np.sum(face_mask) == 0:
-                return self.analyze_skin_tone_fallback(image)
+            if np.sum(refined_mask) > 0:
+                skin_pixels = rgb_image[refined_mask > 100]
+                if len(skin_pixels) > 0:
+                    avg_skin_tone = np.median(skin_pixels, axis=0).astype(int)
+                    return avg_skin_tone.tolist(), "Skin tone analyzed (advanced detection)"
             
-            # Extract skin samples from masked area
-            skin_pixels = image[face_mask > 128]
-            
-            if len(skin_pixels) == 0:
-                return self.analyze_skin_tone_fallback(image)
-            
-            # Convert to RGB for analysis
-            skin_rgb = cv2.cvtColor(skin_pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2RGB).reshape(-1, 3)
-            
-            # Remove outliers using percentiles
-            lower_percentile = np.percentile(skin_rgb, 5, axis=0)
-            upper_percentile = np.percentile(skin_rgb, 95, axis=0)
-            
-            # Filter out extreme values
-            mask = np.all((skin_rgb >= lower_percentile) & (skin_rgb <= upper_percentile), axis=1)
-            filtered_skin = skin_rgb[mask]
-            
-            if len(filtered_skin) == 0:
-                avg_skin_tone = np.mean(skin_rgb, axis=0).astype(int)
-            else:
-                avg_skin_tone = np.mean(filtered_skin, axis=0).astype(int)
-            
-            return avg_skin_tone.tolist(), "Skin tone analyzed precisely"
+            # Method 3: Face detection fallback
+            return self.analyze_skin_tone_fallback(image)
             
         except Exception as e:
-            logger.error(f"Error in precise skin analysis: {str(e)}")
+            logger.error(f"Error in advanced skin analysis: {str(e)}")
             return self.analyze_skin_tone_fallback(image)
 
     def analyze_skin_tone_fallback(self, image):
-        """Fallback skin tone analysis using face detection"""
+        """Fallback skin tone analysis"""
         try:
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = self.face_detection.process(rgb_image)
@@ -144,9 +229,9 @@ class SkinTracker:
             box_w = int(bbox.width * w)
             box_h = int(bbox.height * h)
             
-            # Expand region for better sampling
-            padding_w = int(box_w * 0.2)
-            padding_h = int(box_h * 0.1)
+            # Expanded region dengan padding
+            padding_w = int(box_w * 0.25)
+            padding_h = int(box_h * 0.15)
             
             x_start = max(0, x - padding_w)
             y_start = max(0, y - padding_h)
@@ -158,40 +243,35 @@ class SkinTracker:
             if face_region.size == 0:
                 return None, "Invalid face region"
             
-            # Sample from specific facial areas
-            region_h, region_w, _ = face_region.shape
-            
-            # Cheek areas
-            left_cheek = face_region[region_h//3:2*region_h//3, region_w//8:region_w//3]
-            right_cheek = face_region[region_h//3:2*region_h//3, 2*region_w//3:7*region_w//8]
-            
-            # Forehead
-            forehead = face_region[region_h//10:region_h//4, region_w//3:2*region_w//3]
+            # Advanced sampling dari multiple regions
+            region_rgb = cv2.cvtColor(face_region, cv2.COLOR_BGR2RGB)
+            region_h, region_w, _ = region_rgb.shape
             
             samples = []
-            for region in [left_cheek, right_cheek, forehead]:
-                if region.size > 0:
-                    region_rgb = cv2.cvtColor(region, cv2.COLOR_BGR2RGB)
-                    # Sample center area
-                    h_r, w_r, _ = region_rgb.shape
-                    center_y, center_x = h_r//2, w_r//2
-                    
-                    # Sample 5x5 area
-                    sample_size = 5
-                    y1 = max(0, center_y - sample_size//2)
-                    y2 = min(h_r, center_y + sample_size//2 + 1)
-                    x1 = max(0, center_x - sample_size//2)
-                    x2 = min(w_r, center_x + sample_size//2 + 1)
-                    
-                    sample_area = region_rgb[y1:y2, x1:x2]
-                    if sample_area.size > 0:
-                        samples.extend(sample_area.reshape(-1, 3))
+            sampling_points = [
+                (region_h//3, region_w//4),    # Left cheek
+                (region_h//3, 3*region_w//4),  # Right cheek
+                (region_h//6, region_w//2),    # Forehead
+                (2*region_h//3, region_w//2),  # Chin
+            ]
+            
+            for y_pos, x_pos in sampling_points:
+                # Sample 7x7 area untuk lebih banyak data
+                y1 = max(0, y_pos - 3)
+                y2 = min(region_h, y_pos + 4)
+                x1 = max(0, x_pos - 3)
+                x2 = min(region_w, x_pos + 4)
+                
+                sample_area = region_rgb[y1:y2, x1:x2]
+                if sample_area.size > 0:
+                    samples.extend(sample_area.reshape(-1, 3))
             
             if not samples:
                 return None, "No skin samples found"
             
             samples_array = np.array(samples)
-            avg_skin_tone = np.mean(samples_array, axis=0).astype(int)
+            # Use median untuk menghindari outlier
+            avg_skin_tone = np.median(samples_array, axis=0).astype(int)
             
             return avg_skin_tone.tolist(), "Skin tone analyzed (fallback)"
             
@@ -199,101 +279,64 @@ class SkinTracker:
             logger.error(f"Error in fallback skin analysis: {str(e)}")
             return None, f"Analysis error: {str(e)}"
 
-    def apply_foundation_precise(self, image, foundation_hex):
-        """Apply foundation with precise facial mapping"""
+    def apply_natural_skin_tone(self, image, foundation_hex):
+        """Apply foundation with natural blending like Instagram filters"""
         try:
-            landmarks = self.get_face_landmarks(image)
-            
-            if landmarks is None:
-                return self.apply_foundation_fallback(image, foundation_hex), "Applied with fallback"
-            
-            # Convert hex to BGR
+            # Convert hex to RGB
             foundation_hex = foundation_hex.lstrip('#')
-            foundation_rgb = tuple(int(foundation_hex[i:i+2], 16) for i in (0, 2, 4))
-            foundation_bgr = (foundation_rgb[2], foundation_rgb[1], foundation_rgb[0])
+            target_rgb = tuple(int(foundation_hex[i:i+2], 16) for i in (0, 2, 4))
+            target_bgr = (target_rgb[2], target_rgb[1], target_rgb[0])
             
-            # Create precise face mask
-            face_mask = self.create_precise_face_mask(image, landmarks)
+            # Convert image to RGB for processing
+            img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
-            if np.sum(face_mask) == 0:
-                return self.apply_foundation_fallback(image, foundation_hex), "Applied with fallback"
+            # Get advanced skin mask
+            landmarks = self.get_face_landmarks_precise(image)
+            if landmarks:
+                face_mask = self.create_advanced_face_mask(image, landmarks)
+            else:
+                # Fallback to skin detection
+                face_mask = self.detect_skin_protected(img_rgb)
+                face_mask = self.refine_mask_advanced(face_mask, img_rgb)
             
-            # Create foundation layer
-            foundation_layer = np.zeros_like(image)
-            foundation_layer[:] = foundation_bgr
-            
-            # Convert mask to float for blending
+            # Normalize mask untuk alpha blending yang sangat halus
             mask_float = face_mask.astype(float) / 255.0
-            mask_float = np.stack([mask_float] * 3, axis=-1)
             
-            # Enhanced blending with different strengths for different areas
-            blend_strength = 0.75  # 75% foundation
+            # Preserve original image texture and details
+            result = img_rgb.copy().astype(float)
             
-            # Create blended result
-            blended = (foundation_layer * blend_strength + image * (1 - blend_strength))
+            # Apply natural color blending
+            for c in range(3):
+                original_channel = img_rgb[:, :, c].astype(float)
+                target_value = target_rgb[c]
+                
+                # Natural blending dengan texture preservation
+                blend_strength = 0.65  # Optimal untuk natural look
+                blended = original_channel * (1 - mask_float * blend_strength) + \
+                         target_value * mask_float * blend_strength
+                
+                # Maintain original texture details
+                original_detail = original_channel - cv2.GaussianBlur(original_channel, (0, 0), 1)
+                blended = blended + original_detail * 0.4
+                
+                result[:, :, c] = np.clip(blended, 0, 255)
             
-            # Apply only to face area with smooth transition
-            result_image = (blended * mask_float + image * (1 - mask_float)).astype(np.uint8)
+            # Final smoothing untuk natural look
+            result = cv2.GaussianBlur(result, (0, 0), 0.8)
+            result_uint8 = result.astype(np.uint8)
             
-            return result_image, "Foundation applied precisely"
+            # Soft glow effect untuk hasil yang lebih natural
+            glow = cv2.GaussianBlur(result_uint8, (0, 0), 1.5)
+            result_uint8 = cv2.addWeighted(result_uint8, 0.8, glow, 0.2, 0)
+            
+            # Convert back to BGR
+            result_bgr = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2BGR)
+            
+            return result_bgr, "Foundation applied naturally"
             
         except Exception as e:
-            logger.error(f"Error in precise foundation application: {str(e)}")
-            return self.apply_foundation_fallback(image, foundation_hex), f"Applied with fallback: {str(e)}"
+            logger.error(f"Error applying natural skin tone: {str(e)}")
+            return image, f"Application error: {str(e)}"
 
-    def apply_foundation_fallback(self, image, foundation_hex):
-        """Fallback foundation application"""
-        try:
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            results = self.face_detection.process(rgb_image)
-            
-            if not results.detections:
-                return image
-            
-            # Convert hex to BGR
-            foundation_hex = foundation_hex.lstrip('#')
-            foundation_rgb = tuple(int(foundation_hex[i:i+2], 16) for i in (0, 2, 4))
-            foundation_bgr = (foundation_rgb[2], foundation_rgb[1], foundation_rgb[0])
-            
-            result_image = image.copy()
-            
-            for detection in results.detections:
-                bbox = detection.location_data.relative_bounding_box
-                h, w, _ = image.shape
-                
-                x = int(bbox.xmin * w)
-                y = int(bbox.ymin * h)
-                box_w = int(bbox.width * w)
-                box_h = int(bbox.height * h)
-                
-                # Expand region
-                padding = int(box_h * 0.2)
-                x_start = max(0, x - padding)
-                y_start = max(0, y - padding)
-                x_end = min(w, x + box_w + padding)
-                y_end = min(h, y + box_h + padding)
-                
-                # Create mask
-                mask = np.zeros((h, w), dtype=np.uint8)
-                cv2.rectangle(mask, (x_start, y_start), (x_end, y_end), 255, -1)
-                
-                # Smooth mask
-                mask = cv2.GaussianBlur(mask, (51, 51), 0)
-                
-                # Apply foundation
-                mask_float = mask.astype(float) / 255.0
-                mask_float = np.stack([mask_float] * 3, axis=-1)
-                
-                foundation_layer = np.zeros_like(image)
-                foundation_layer[:] = foundation_bgr
-                
-                blend_strength = 0.7
-                blended = (foundation_layer * blend_strength + image * (1 - blend_strength))
-                
-                result_image = (blended * mask_float + result_image * (1 - mask_float)).astype(np.uint8)
-            
-            return result_image
-            
-        except Exception as e:
-            logger.error(f"Error in fallback foundation application: {str(e)}")
-            return image
+# Global instance
+skin_tracker = AdvancedSkinTracker()

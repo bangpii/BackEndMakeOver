@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import base64
 import logging
-from skin_tracker import SkinTracker
+from skin_tracker import skin_tracker
 
 app = FastAPI(title="MakeOver Backend")
 
@@ -21,9 +21,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize skin tracker
-skin_tracker = SkinTracker()
 
 # Skin tone categories
 SKIN_TONE_CATEGORIES = {
@@ -79,7 +76,7 @@ def find_best_matching_foundation(skin_tone_rgb):
     best_matches.sort(key=lambda x: x["distance"])
     
     # Get top matches
-    top_matches = best_matches[:6]
+    top_matches = best_matches[:8]
     
     # Group by category
     category_matches = {}
@@ -92,11 +89,11 @@ def find_best_matching_foundation(skin_tone_rgb):
     # Get best from each category
     recommended_matches = []
     for category, matches in category_matches.items():
-        recommended_matches.extend(matches[:2])  # Top 2 from each category
+        recommended_matches.extend(matches[:2])
     
     return {
         "primary_category": top_matches[0]["category"],
-        "recommended_matches": recommended_matches[:4]  # Return top 4
+        "recommended_matches": recommended_matches[:4]
     }
 
 def image_to_base64(image):
@@ -123,8 +120,8 @@ async def analyze_skin(file: UploadFile = File(...)):
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Analyze skin tone with precise tracking
-        skin_tone, message = skin_tracker.analyze_skin_tone_precise(image)
+        # Analyze skin tone with advanced tracking
+        skin_tone, message = skin_tracker.analyze_skin_tone_advanced(image)
         
         if skin_tone is None:
             return JSONResponse(
@@ -159,8 +156,8 @@ async def apply_foundation(file: UploadFile = File(...), foundation_hex: str = "
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Apply foundation with precise tracking
-        result_image, message = skin_tracker.apply_foundation_precise(image, foundation_hex)
+        # Apply foundation with natural blending
+        result_image, message = skin_tracker.apply_natural_skin_tone(image, foundation_hex)
         
         return {
             "success": True,
