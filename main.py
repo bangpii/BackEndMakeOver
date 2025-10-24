@@ -6,8 +6,8 @@ app = FastAPI(title="MakeOver Backend")
 origins = [
     "http://localhost:3000",
     "http://localhost:5173",
-    "make-over-one.vercel.app",
-    "https://backend-makeover.com"  # Tambahkan domain backend sendiri
+    "https://make-over-one.vercel.app/",
+    "https://backendmakeover-production.up.railway.app/"  # Tambahkan domain backend sendiri
 ]
 
 app.add_middleware(
