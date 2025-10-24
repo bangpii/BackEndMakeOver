@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import cv2
@@ -73,8 +73,12 @@ def save_uploaded_file(file_contents, filename):
 
 def image_to_base64(image):
     """Convert OpenCV image to base64"""
-    _, buffer = cv2.imencode('.jpg', image)
-    return base64.b64encode(buffer).decode('utf-8')
+    try:
+        _, buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        return base64.b64encode(buffer).decode('utf-8')
+    except Exception as e:
+        logger.error(f"Error converting image to base64: {str(e)}")
+        return None
 
 def find_best_matching_foundation(skin_tone_rgb):
     """Find the best matching foundation colors based on skin tone"""
@@ -102,7 +106,7 @@ def find_best_matching_foundation(skin_tone_rgb):
     best_matches.sort(key=lambda x: x["distance"])
     
     # Get top matches
-    top_matches = best_matches[:8]
+    top_matches = best_matches[:6]
     
     # Group by category
     category_matches = {}
@@ -139,8 +143,12 @@ async def upload_photo(file: UploadFile = File(...)):
         # Read file contents
         contents = await file.read()
         
+        # Check file size (prevent 414 error)
+        if len(contents) > 10 * 1024 * 1024:  # 10MB limit
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB")
+        
         # Generate unique filename
-        file_extension = os.path.splitext(file.filename)[1]
+        file_extension = os.path.splitext(file.filename)[1] or '.jpg'
         unique_filename = f"{session_id}_original{file_extension}"
         
         # Save original file
@@ -164,7 +172,7 @@ async def upload_photo(file: UploadFile = File(...)):
         }
         
         # Analyze skin tone
-        skin_tone, message = skin_tracker.analyze_skin_tone_advanced(image)
+        skin_tone, message = skin_tracker.analyze_skin_tone_precise(image)
         
         foundation_matches = None
         if skin_tone:
@@ -185,23 +193,36 @@ async def upload_photo(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/api/apply-foundation")
-async def apply_foundation(file: UploadFile = File(...), foundation_hex: str = "#F9E6E6", session_id: str = None):
+async def apply_foundation(
+    file: UploadFile = File(...),
+    foundation_hex: str = Form("#F9E6E6"),
+    session_id: str = Form(None)
+):
     try:
         # Read image file
         contents = await file.read()
+        
+        # Check file size
+        if len(contents) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large")
+            
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Apply foundation with natural blending
-        result_image, message = skin_tracker.apply_natural_skin_tone(image, foundation_hex)
+        # Apply foundation with precise skin tracking
+        result_image, message = skin_tracker.apply_foundation_to_skin(image, foundation_hex)
+        
+        result_base64 = image_to_base64(result_image)
+        if not result_base64:
+            raise HTTPException(status_code=500, detail="Failed to process image")
         
         return {
             "success": True,
             "message": message,
-            "processed_image": f"data:image/jpeg;base64,{image_to_base64(result_image)}",
+            "processed_image": f"data:image/jpeg;base64,{result_base64}",
             "applied_foundation": foundation_hex
         }
         
@@ -210,7 +231,7 @@ async def apply_foundation(file: UploadFile = File(...), foundation_hex: str = "
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/api/reset-to-original")
-async def reset_to_original(session_id: str):
+async def reset_to_original(session_id: str = Form(...)):
     try:
         if session_id not in user_sessions:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -232,14 +253,18 @@ async def analyze_skin(file: UploadFile = File(...)):
     try:
         # Read image file
         contents = await file.read()
+        
+        if len(contents) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large")
+            
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Analyze skin tone with advanced tracking
-        skin_tone, message = skin_tracker.analyze_skin_tone_advanced(image)
+        # Analyze skin tone with precise tracking
+        skin_tone, message = skin_tracker.analyze_skin_tone_precise(image)
         
         if skin_tone is None:
             return JSONResponse(
@@ -250,42 +275,22 @@ async def analyze_skin(file: UploadFile = File(...)):
         # Find matching foundation
         foundation_matches = find_best_matching_foundation(skin_tone)
         
+        image_base64 = image_to_base64(image)
+        if not image_base64:
+            raise HTTPException(status_code=500, detail="Failed to process image")
+        
         return {
             "success": True,
             "message": message,
             "skin_tone_rgb": skin_tone,
             "skin_tone_hex": f"#{skin_tone[0]:02x}{skin_tone[1]:02x}{skin_tone[2]:02x}",
             "foundation_recommendations": foundation_matches,
-            "processed_image": f"data:image/jpeg;base64,{image_to_base64(image)}"
+            "processed_image": f"data:image/jpeg;base64,{image_base64}"
         }
         
     except Exception as e:
         logger.error(f"Error in analyze-skin endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-# Cleanup old sessions (optional)
-def cleanup_old_sessions():
-    """Clean up sessions older than 1 hour"""
-    try:
-        current_time = datetime.now()
-        sessions_to_remove = []
-        
-        for session_id, session_data in user_sessions.items():
-            upload_time = datetime.fromisoformat(session_data["upload_time"])
-            if (current_time - upload_time).total_seconds() > 3600:  # 1 hour
-                sessions_to_remove.append(session_id)
-        
-        for session_id in sessions_to_remove:
-            # Remove file from disk
-            if os.path.exists(user_sessions[session_id]["original_path"]):
-                os.remove(user_sessions[session_id]["original_path"])
-            # Remove from memory
-            del user_sessions[session_id]
-            
-        logger.info(f"Cleaned up {len(sessions_to_remove)} old sessions")
-        
-    except Exception as e:
-        logger.error(f"Error cleaning up sessions: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
