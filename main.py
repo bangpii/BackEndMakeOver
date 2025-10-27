@@ -11,6 +11,16 @@ import uuid
 from datetime import datetime
 from skin_tracker import skin_tracker
 
+# Import MediaPipe untuk LiveFaceTracker
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("MediaPipe successfully imported")
+except ImportError as e:
+    MEDIAPIPE_AVAILABLE = False
+    logger.error(f"MediaPipe import failed: {str(e)}")
+
 app = FastAPI(title="MakeOver Backend")
 
 # Configure logging
@@ -64,6 +74,221 @@ SKIN_TONE_CATEGORIES = {
     ]
 }
 
+# ========== INTEGRASI LIVE FACE TRACKER ==========
+
+class LiveFaceTracker:
+    def __init__(self):
+        if not MEDIAPIPE_AVAILABLE:
+            logger.error("MediaPipe not available - LiveFaceTracker disabled")
+            return
+            
+        try:
+            self.mp_face_mesh = mp.solutions.face_mesh
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            
+            # Define regions untuk pipi dan bibir
+            self.cheek_regions = {
+                "left_cheek": [117, 118, 119, 100, 47, 126, 209, 49, 131, 134, 51, 4, 5, 50, 101, 36, 137, 177, 123, 116, 111, 143],
+                "right_cheek": [346, 347, 348, 329, 277, 355, 429, 279, 360, 363, 281, 4, 5, 280, 330, 266, 366, 397, 352, 345, 340, 372],
+            }
+            
+            self.lip_regions = {
+                "upper_lip": [61, 146, 91, 181, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95],
+                "lower_lip": [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191],
+            }
+            logger.info("LiveFaceTracker initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing LiveFaceTracker: {str(e)}")
+            self.face_mesh = None
+
+    def get_face_landmarks(self, image):
+        if not MEDIAPIPE_AVAILABLE or not self.face_mesh:
+            return None
+            
+        try:
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            results = self.face_mesh.process(rgb_image)
+            return results.multi_face_landmarks[0] if results.multi_face_landmarks else None
+        except Exception as e:
+            logger.error(f"Error in face landmarks: {str(e)}")
+            return None
+
+    def create_cheek_mask(self, image, landmarks):
+        h, w = image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        if not landmarks:
+            return mask
+            
+        try:
+            # Left cheek points
+            left_points = []
+            for idx in self.cheek_regions["left_cheek"]:
+                if idx < len(landmarks.landmark):
+                    landmark = landmarks.landmark[idx]
+                    x = int(landmark.x * w)
+                    y = int(landmark.y * h)
+                    left_points.append([x, y])
+            
+            # Right cheek points
+            right_points = []
+            for idx in self.cheek_regions["right_cheek"]:
+                if idx < len(landmarks.landmark):
+                    landmark = landmarks.landmark[idx]
+                    x = int(landmark.x * w)
+                    y = int(landmark.y * h)
+                    right_points.append([x, y])
+            
+            # Create masks
+            if len(left_points) > 2:
+                left_hull = cv2.convexHull(np.array(left_points))
+                cv2.fillConvexPoly(mask, left_hull, 255)
+            
+            if len(right_points) > 2:
+                right_hull = cv2.convexHull(np.array(right_points))
+                cv2.fillConvexPoly(mask, right_hull, 255)
+            
+            # Smooth mask
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            mask = cv2.GaussianBlur(mask, (31, 31), 7)
+            
+            return mask
+            
+        except Exception as e:
+            logger.error(f"Error creating cheek mask: {str(e)}")
+            return mask
+
+    def create_lip_mask(self, image, landmarks):
+        h, w = image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        if not landmarks:
+            return mask
+            
+        try:
+            lip_points = []
+            
+            # Collect lip points
+            for region_name, indices in self.lip_regions.items():
+                for idx in indices:
+                    if idx < len(landmarks.landmark):
+                        landmark = landmarks.landmark[idx]
+                        x = int(landmark.x * w)
+                        y = int(landmark.y * h)
+                        lip_points.append([x, y])
+            
+            if len(lip_points) > 2:
+                hull = cv2.convexHull(np.array(lip_points))
+                cv2.fillConvexPoly(mask, hull, 255)
+                
+                # Smooth mask
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                mask = cv2.GaussianBlur(mask, (15, 15), 3)
+                
+            return mask
+            
+        except Exception as e:
+            logger.error(f"Error creating lip mask: {str(e)}")
+            return mask
+
+    def apply_cheek_color(self, image, cheek_hex):
+        try:
+            if not cheek_hex:
+                return image, "No cheek color provided"
+                
+            # Convert hex to RGB
+            cheek_hex = cheek_hex.lstrip('#')
+            if len(cheek_hex) != 6:
+                return image, "Invalid cheek color format"
+                
+            target_rgb = tuple(int(cheek_hex[i:i+2], 16) for i in (0, 2, 4))
+            
+            # Get landmarks dan create mask
+            landmarks = self.get_face_landmarks(image)
+            if not landmarks:
+                return image, "No face detected"
+            
+            cheek_mask = self.create_cheek_mask(image, landmarks)
+            
+            if np.sum(cheek_mask) == 0:
+                return image, "No cheek area detected"
+            
+            # Apply color dengan blending
+            mask_float = cheek_mask.astype(float) / 255.0
+            mask_float = np.stack([mask_float] * 3, axis=-1)
+            
+            # Buat color layer
+            cheek_layer = np.ones_like(image, dtype=float)
+            cheek_layer[:, :, 0] = target_rgb[2]  # B
+            cheek_layer[:, :, 1] = target_rgb[1]  # G  
+            cheek_layer[:, :, 2] = target_rgb[0]  # R
+            
+            # Blending
+            result = image.astype(float) * (1 - mask_float) + cheek_layer * mask_float * 0.3
+            result = np.clip(result, 0, 255).astype(np.uint8)
+            
+            return result, "Cheek color applied"
+            
+        except Exception as e:
+            logger.error(f"Error applying cheek color: {str(e)}")
+            return image, f"Error: {str(e)}"
+
+    def apply_lipstick(self, image, lipstick_hex):
+        try:
+            if not lipstick_hex:
+                return image, "No lipstick color provided"
+                
+            # Convert hex to RGB
+            lipstick_hex = lipstick_hex.lstrip('#')
+            if len(lipstick_hex) != 6:
+                return image, "Invalid lipstick color format"
+                
+            target_rgb = tuple(int(lipstick_hex[i:i+2], 16) for i in (0, 2, 4))
+            
+            # Get landmarks dan create mask
+            landmarks = self.get_face_landmarks(image)
+            if not landmarks:
+                return image, "No face detected"
+            
+            lip_mask = self.create_lip_mask(image, landmarks)
+            
+            if np.sum(lip_mask) == 0:
+                return image, "No lip area detected"
+            
+            # Apply color dengan blending
+            mask_float = lip_mask.astype(float) / 255.0
+            mask_float = np.stack([mask_float] * 3, axis=-1)
+            
+            # Buat color layer
+            lip_layer = np.ones_like(image, dtype=float)
+            lip_layer[:, :, 0] = target_rgb[2]  # B
+            lip_layer[:, :, 1] = target_rgb[1]  # G  
+            lip_layer[:, :, 2] = target_rgb[0]  # R
+            
+            # Blending yang lebih kuat untuk lipstick
+            result = image.astype(float) * (1 - mask_float) + lip_layer * mask_float * 0.7
+            result = np.clip(result, 0, 255).astype(np.uint8)
+            
+            return result, "Lipstick applied"
+            
+        except Exception as e:
+            logger.error(f"Error applying lipstick: {str(e)}")
+            return image, f"Error: {str(e)}"
+
+# Initialize live processor
+live_face_tracker = LiveFaceTracker()
+
+# ========== FUNGSI UTILITAS ==========
+
 def save_uploaded_file(file_contents, filename):
     """Save uploaded file to uploads directory"""
     try:
@@ -78,11 +303,9 @@ def save_uploaded_file(file_contents, filename):
 def image_to_base64(image):
     """Convert OpenCV image to base64"""
     try:
-        # Ensure image is in correct format
         if image.dtype != np.uint8:
             image = np.clip(image, 0, 255).astype(np.uint8)
         
-        # Encode with good quality
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
         _, buffer = cv2.imencode('.jpg', image, encode_param)
         return base64.b64encode(buffer).decode('utf-8')
@@ -100,11 +323,9 @@ def find_best_matching_foundation(skin_tone_rgb):
     
     best_matches = []
     
-    # Calculate color distance for all foundation shades
     for category, shades in SKIN_TONE_CATEGORIES.items():
         for shade in shades:
             shade_rgb = np.array(shade["rgb"])
-            # Calculate Euclidean distance in RGB space
             distance = np.linalg.norm(skin_tone_array - shade_rgb)
             best_matches.append({
                 "category": category,
@@ -112,13 +333,9 @@ def find_best_matching_foundation(skin_tone_rgb):
                 "distance": distance
             })
     
-    # Sort by closest match
     best_matches.sort(key=lambda x: x["distance"])
-    
-    # Get top matches
     top_matches = best_matches[:6]
     
-    # Group by category
     category_matches = {}
     for match in top_matches:
         category = match["category"]
@@ -126,7 +343,6 @@ def find_best_matching_foundation(skin_tone_rgb):
             category_matches[category] = []
         category_matches[category].append(match["shade"])
     
-    # Get best from each category
     recommended_matches = []
     for category, matches in category_matches.items():
         recommended_matches.extend(matches[:2])
@@ -136,6 +352,63 @@ def find_best_matching_foundation(skin_tone_rgb):
         "recommended_matches": recommended_matches[:4]
     }
 
+# ========== SIMPLE FALLBACK UNTUK LIVE PROCESSING ==========
+
+def apply_simple_color_overlay(image, cheek_color=None, lipstick_color=None):
+    """Apply simple color overlay tanpa face detection"""
+    try:
+        result = image.copy()
+        
+        if cheek_color:
+            # Convert hex to BGR
+            cheek_hex = cheek_color.lstrip('#')
+            cheek_rgb = tuple(int(cheek_hex[i:i+2], 16) for i in (0, 2, 4))
+            cheek_bgr = (cheek_rgb[2], cheek_rgb[1], cheek_rgb[0])  # RGB to BGR
+            
+            # Create cheek overlay (simple rectangular areas)
+            h, w = image.shape[:2]
+            cheek_overlay = np.zeros_like(image)
+            
+            # Define cheek areas (simple rectangles)
+            left_cheek = (int(w*0.1), int(h*0.4), int(w*0.4), int(h*0.7))
+            right_cheek = (int(w*0.6), int(h*0.4), int(w*0.9), int(h*0.7))
+            
+            # Apply color to cheek areas
+            cheek_overlay[left_cheek[1]:left_cheek[3], left_cheek[0]:left_cheek[2]] = cheek_bgr
+            cheek_overlay[right_cheek[1]:right_cheek[3], right_cheek[0]:right_cheek[2]] = cheek_bgr
+            
+            # Blend with original image
+            alpha = 0.3  # Transparency
+            result = cv2.addWeighted(result, 1, cheek_overlay, alpha, 0)
+        
+        if lipstick_color:
+            # Convert hex to BGR
+            lip_hex = lipstick_color.lstrip('#')
+            lip_rgb = tuple(int(lip_hex[i:i+2], 16) for i in (0, 2, 4))
+            lip_bgr = (lip_rgb[2], lip_rgb[1], lip_rgb[0])  # RGB to BGR
+            
+            # Create lip overlay
+            h, w = image.shape[:2]
+            lip_overlay = np.zeros_like(image)
+            
+            # Define lip area (simple rectangle)
+            lip_area = (int(w*0.3), int(h*0.6), int(w*0.7), int(h*0.75))
+            
+            # Apply color to lip area
+            lip_overlay[lip_area[1]:lip_area[3], lip_area[0]:lip_area[2]] = lip_bgr
+            
+            # Blend with original image
+            alpha = 0.5  # More opaque for lips
+            result = cv2.addWeighted(result, 1, lip_overlay, alpha, 0)
+        
+        return result, "Color effects applied successfully"
+        
+    except Exception as e:
+        logger.error(f"Error in simple color overlay: {str(e)}")
+        return image, f"Error applying color: {str(e)}"
+
+# ========== ENDPOINTS ==========
+
 @app.get("/")
 def read_root():
     return {"message": "Backend is running!"}
@@ -144,37 +417,39 @@ def read_root():
 def say_hello():
     return {"message": "Hello from FastAPI backend!"}
 
+@app.get("/api/health")
+def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "mediapipe_available": MEDIAPIPE_AVAILABLE,
+        "service": "MakeOver Backend",
+        "timestamp": datetime.now().isoformat()
+    }
+
 @app.post("/api/upload-photo")
 async def upload_photo(file: UploadFile = File(...)):
     try:
-        # Generate unique session ID
         session_id = str(uuid.uuid4())
-        
-        # Read file contents
         contents = await file.read()
         
-        # Check file size (prevent 414 error)
-        if len(contents) > 10 * 1024 * 1024:  # 10MB limit
+        if len(contents) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB")
         
-        # Generate unique filename
         file_extension = os.path.splitext(file.filename)[1] or '.jpg'
         unique_filename = f"{session_id}_original{file_extension}"
         
-        # Save original file
         original_path = save_uploaded_file(contents, unique_filename)
         
         if not original_path:
             raise HTTPException(status_code=500, detail="Failed to save file")
         
-        # Decode image for processing
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Store user session with proper image data
         original_base64 = image_to_base64(image)
         if not original_base64:
             raise HTTPException(status_code=500, detail="Failed to process image")
@@ -182,11 +457,10 @@ async def upload_photo(file: UploadFile = File(...)):
         user_sessions[session_id] = {
             "original_path": original_path,
             "original_image_base64": original_base64,
-            "original_image": image.copy(),  # Store the actual image array
+            "original_image": image.copy(),
             "upload_time": datetime.now().isoformat()
         }
         
-        # Analyze skin tone
         skin_tone, message = skin_tracker.analyze_skin_tone_precise(image)
         
         foundation_matches = None
@@ -214,10 +488,8 @@ async def apply_foundation(
     session_id: str = Form(None)
 ):
     try:
-        # Read image file
         contents = await file.read()
         
-        # Check file size
         if len(contents) > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large")
             
@@ -227,7 +499,6 @@ async def apply_foundation(
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Apply foundation with precise skin tracking
         result_image, message = skin_tracker.apply_foundation_to_skin(image, foundation_hex)
         
         result_base64 = image_to_base64(result_image)
@@ -252,8 +523,6 @@ async def reset_to_original(session_id: str = Form(...)):
             raise HTTPException(status_code=404, detail="Session not found")
         
         session_data = user_sessions[session_id]
-        
-        # Get the original image base64 from session
         original_base64 = session_data["original_image_base64"]
         
         if not original_base64:
@@ -272,7 +541,6 @@ async def reset_to_original(session_id: str = Form(...)):
 @app.post("/api/analyze-skin")
 async def analyze_skin(file: UploadFile = File(...)):
     try:
-        # Read image file
         contents = await file.read()
         
         if len(contents) > 10 * 1024 * 1024:
@@ -284,7 +552,6 @@ async def analyze_skin(file: UploadFile = File(...)):
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Analyze skin tone with precise tracking
         skin_tone, message = skin_tracker.analyze_skin_tone_precise(image)
         
         if skin_tone is None:
@@ -293,7 +560,6 @@ async def analyze_skin(file: UploadFile = File(...)):
                 content={"success": False, "error": message}
             )
         
-        # Find matching foundation
         foundation_matches = find_best_matching_foundation(skin_tone)
         
         image_base64 = image_to_base64(image)
@@ -313,76 +579,143 @@ async def analyze_skin(file: UploadFile = File(...)):
         logger.error(f"Error in analyze-skin endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# ========== TAMBAHAN ENDPOINT UNTUK LIVE CAMERA PROCESSING ==========
+# ========== ENDPOINT LIVE PROCESSING YANG DIPERBAIKI ==========
 
 @app.post("/api/process-live-frame")
 async def process_live_frame(data: dict):
     """Endpoint untuk processing frame live camera dengan efek real-time"""
     try:
+        logger.info("Received live frame processing request")
+        
         if not data or 'image' not in data:
+            logger.error("No image data in request")
             raise HTTPException(status_code=400, detail="No image data provided")
         
         frame_data = data.get('image')
         cheek_color = data.get('cheek_color')
         lipstick_color = data.get('lipstick_color')
         
-        logger.info(f"Processing live frame - Cheek: {cheek_color}, Lipstick: {lipstick_color}")
+        logger.info(f"Processing frame - Cheek: {cheek_color}, Lipstick: {lipstick_color}")
+        
+        # Validate colors
+        if cheek_color:
+            cheek_color = cheek_color.lstrip('#')
+            if len(cheek_color) != 6:
+                cheek_color = None
+                logger.warning("Invalid cheek color format")
+        
+        if lipstick_color:
+            lipstick_color = lipstick_color.lstrip('#')
+            if len(lipstick_color) != 6:
+                lipstick_color = None
+                logger.warning("Invalid lipstick color format")
         
         # Decode base64 image
-        if ',' in frame_data:
-            frame_data = frame_data.split(',')[1]
+        try:
+            if ',' in frame_data:
+                frame_data = frame_data.split(',')[1]
+            
+            img_data = base64.b64decode(frame_data)
+            nparr = np.frombuffer(img_data, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if image is None:
+                logger.error("Failed to decode image")
+                raise HTTPException(status_code=400, detail="Invalid image data")
+                
+            logger.info(f"Image decoded successfully: {image.shape}")
+            
+        except Exception as e:
+            logger.error(f"Error decoding image: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
         
-        img_data = base64.b64decode(frame_data)
-        nparr = np.frombuffer(img_data, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if image is None:
-            raise HTTPException(status_code=400, detail="Invalid image data")
-        
-        # Resize image untuk performance yang lebih baik
+        # Resize untuk performance
         h, w = image.shape[:2]
         if w > 800:
             scale = 800 / w
             new_w = 800
             new_h = int(h * scale)
             image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            logger.info(f"Image resized to: {image.shape}")
         
-        # Apply effects jika ada warna yang dipilih
+        # Apply effects
         result_image = image.copy()
         messages = []
         
         if cheek_color or lipstick_color:
-            # Apply cheek color jika ada
-            if cheek_color:
-                cheek_result, cheek_msg = skin_tracker.apply_cheek_color(image, cheek_color)
-                if "applied" in cheek_msg.lower():
-                    result_image = cheek_result
-                    messages.append("Cheek color applied")
+            try:
+                # Gunakan LiveFaceTracker jika tersedia, jika tidak gunakan fallback
+                if MEDIAPIPE_AVAILABLE:
+                    # Apply cheek color jika ada
+                    if cheek_color:
+                        cheek_result, cheek_msg = live_face_tracker.apply_cheek_color(
+                            result_image, f"#{cheek_color}" if cheek_color else None
+                        )
+                        if "applied" in cheek_msg.lower():
+                            result_image = cheek_result
+                            messages.append("Cheek color applied")
+                        else:
+                            messages.append(f"Cheek: {cheek_msg}")
+                    
+                    # Apply lipstick jika ada
+                    if lipstick_color:
+                        lip_result, lip_msg = live_face_tracker.apply_lipstick(
+                            result_image, f"#{lipstick_color}" if lipstick_color else None
+                        )
+                        if "applied" in lip_msg.lower():
+                            result_image = lip_result
+                            messages.append("Lipstick applied")
+                        else:
+                            messages.append(f"Lipstick: {lip_msg}")
                 else:
-                    messages.append(f"Cheek: {cheek_msg}")
-            
-            # Apply lipstick jika ada
-            if lipstick_color:
-                lip_result, lip_msg = skin_tracker.apply_lipstick(result_image, lipstick_color)
-                if "applied" in lip_msg.lower():
-                    result_image = lip_result
-                    messages.append("Lipstick applied")
-                else:
-                    messages.append(f"Lipstick: {lip_msg}")
+                    # Gunakan simple fallback
+                    result_image, message = apply_simple_color_overlay(
+                        result_image, 
+                        f"#{cheek_color}" if cheek_color else None,
+                        f"#{lipstick_color}" if lipstick_color else None
+                    )
+                    messages.append(message)
+                    logger.info("Using simple color overlay (MediaPipe not available)")
+                
+                logger.info("Color effects applied successfully")
+            except Exception as e:
+                logger.error(f"Error applying color effects: {str(e)}")
+                messages.append(f"Error applying effects: {str(e)}")
+        else:
+            messages.append("No colors selected")
         
-        # Encode result back to base64
-        result_base64 = image_to_base64(result_image)
-        if not result_base64:
-            raise HTTPException(status_code=500, detail="Failed to process image")
+        # Encode result
+        try:
+            result_base64 = image_to_base64(result_image)
+            if not result_base64:
+                logger.error("Failed to encode result image")
+                raise HTTPException(status_code=500, detail="Failed to process image")
+                
+            logger.info("Result image encoded successfully")
+            
+        except Exception as e:
+            logger.error(f"Error encoding result: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to encode image: {str(e)}")
         
         return {
             "success": True,
             "processed_image": f"data:image/jpeg;base64,{result_base64}",
-            "message": " | ".join(messages) if messages else "Frame processed successfully"
+            "message": " | ".join(messages),
+            "mediapipe_available": MEDIAPIPE_AVAILABLE,
+            "debug_info": {
+                "original_size": f"{w}x{h}",
+                "processed_size": f"{result_image.shape[1]}x{result_image.shape[0]}",
+                "cheek_color": cheek_color,
+                "lipstick_color": lipstick_color
+            }
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in process-live-frame endpoint: {str(e)}")
+        logger.error(f"Unexpected error in process-live-frame: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/api/apply-cheek-color")
@@ -404,8 +737,16 @@ async def apply_cheek_color(
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Apply cheek color
-        result_image, message = skin_tracker.apply_cheek_color(image, cheek_hex)
+        if not MEDIAPIPE_AVAILABLE:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "MediaPipe not available for precise face detection"
+                }
+            )
+        
+        result_image, message = live_face_tracker.apply_cheek_color(image, cheek_hex)
         
         result_base64 = image_to_base64(result_image)
         if not result_base64:
@@ -441,8 +782,16 @@ async def apply_lipstick(
         if image is None:
             raise HTTPException(status_code=400, detail="Invalid image file")
         
-        # Apply lipstick
-        result_image, message = skin_tracker.apply_lipstick(image, lipstick_hex)
+        if not MEDIAPIPE_AVAILABLE:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "MediaPipe not available for precise face detection"
+                }
+            )
+        
+        result_image, message = live_face_tracker.apply_lipstick(image, lipstick_hex)
         
         result_base64 = image_to_base64(result_image)
         if not result_base64:
