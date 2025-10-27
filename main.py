@@ -10,6 +10,10 @@ import os
 import uuid
 from datetime import datetime
 from skin_tracker import skin_tracker
+from live_face_tracker import LiveFaceTracker
+
+# Global instance
+live_face_tracker = LiveFaceTracker()
 
 app = FastAPI(title="MakeOver Backend")
 
@@ -320,6 +324,39 @@ async def get_sessions():
         "active_sessions": len(user_sessions),
         "sessions": list(user_sessions.keys())
     }
+
+
+@app.post("/api/process-live-frame")
+async def process_live_frame(
+    image_data: str = Form(...),
+    cheek_color: str = Form(None),
+    lipstick_color: str = Form(None)
+):
+    try:
+        # Process frame dengan live face tracker
+        result_base64, message = live_face_tracker.process_live_frame(
+            image_data, cheek_color, lipstick_color
+        )
+        
+        if result_base64 is None:
+            return JSONResponse(
+                status_code=500,
+                content={"error": message}
+            )
+        
+        return {
+            "success": True,
+            "processed_image": f"data:image/jpeg;base64,{result_base64}",
+            "message": message
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in process-live-frame endpoint: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Processing error: {str(e)}"}
+        )
+
 
 if __name__ == "__main__":
     import uvicorn
