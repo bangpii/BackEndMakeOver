@@ -581,6 +581,199 @@ async def analyze_skin(file: UploadFile = File(...)):
 
 # ========== ENDPOINT LIVE PROCESSING YANG DIPERBAIKI ==========
 
+# Tambahkan endpoint ini di main.py setelah endpoint yang sudah ada
+
+@app.post("/api/process-live-frame-optimized")
+async def process_live_frame_optimized(data: dict):
+    """Optimized endpoint untuk processing frame live camera"""
+    try:
+        logger.info("Received optimized live frame processing request")
+        
+        if not data or 'image' not in data:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "No image data provided"}
+            )
+        
+        frame_data = data.get('image')
+        cheek_color = data.get('cheek_color')
+        lipstick_color = data.get('lipstick_color')
+        
+        logger.info(f"Processing optimized frame - Cheek: {cheek_color}, Lipstick: {lipstick_color}")
+        
+        # Validate colors
+        if cheek_color:
+            cheek_color = cheek_color.lstrip('#')
+            if len(cheek_color) != 6:
+                cheek_color = None
+        
+        if lipstick_color:
+            lipstick_color = lipstick_color.lstrip('#')
+            if len(lipstick_color) != 6:
+                lipstick_color = None
+        
+        # Decode base64 image
+        try:
+            if ',' in frame_data:
+                frame_data = frame_data.split(',')[1]
+            
+            img_data = base64.b64decode(frame_data)
+            nparr = np.frombuffer(img_data, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if image is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "error": "Invalid image data"}
+                )
+                
+        except Exception as e:
+            logger.error(f"Error decoding image: {str(e)}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": f"Invalid image data: {str(e)}"}
+            )
+        
+        # Resize untuk performance
+        h, w = image.shape[:2]
+        if w > 640:  # Lebih kecil untuk performa lebih baik
+            scale = 640 / w
+            new_w = 640
+            new_h = int(h * scale)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # Apply effects dengan optimasi
+        result_image = image.copy()
+        messages = []
+        
+        if cheek_color or lipstick_color:
+            try:
+                # Gunakan simple overlay untuk performa real-time
+                result_image, message = apply_simple_color_overlay_optimized(
+                    result_image, 
+                    f"#{cheek_color}" if cheek_color else None,
+                    f"#{lipstick_color}" if lipstick_color else None
+                )
+                messages.append(message)
+                
+            except Exception as e:
+                logger.error(f"Error applying color effects: {str(e)}")
+                messages.append(f"Error applying effects: {str(e)}")
+        else:
+            messages.append("No colors selected")
+        
+        # Encode result dengan quality lebih rendah untuk performa
+        try:
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # Quality lebih rendah
+            _, buffer = cv2.imencode('.jpg', result_image, encode_param)
+            result_base64 = base64.b64encode(buffer).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Error encoding result: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": f"Failed to encode image: {str(e)}"}
+            )
+        
+        return {
+            "success": True,
+            "processed_image": f"data:image/jpeg;base64,{result_base64}",
+            "message": " | ".join(messages),
+            "debug_info": {
+                "original_size": f"{w}x{h}",
+                "processed_size": f"{result_image.shape[1]}x{result_image.shape[0]}"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in process-live-frame-optimized: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"Internal server error: {str(e)}"}
+        )
+
+def apply_simple_color_overlay_optimized(image, cheek_color=None, lipstick_color=None):
+    """Optimized simple color overlay untuk performa real-time"""
+    try:
+        result = image.copy()
+        h, w = image.shape[:2]
+        
+        if cheek_color:
+            # Convert hex to BGR
+            cheek_hex = cheek_color.lstrip('#')
+            cheek_rgb = tuple(int(cheek_hex[i:i+2], 16) for i in (0, 2, 4))
+            cheek_bgr = (cheek_rgb[2], cheek_rgb[1], cheek_rgb[0])
+            
+            # Create simple cheek overlay dengan bentuk yang lebih natural
+            cheek_overlay = np.zeros_like(image, dtype=np.uint8)
+            
+            # Define oval-shaped cheek areas
+            left_cheek_center = (int(w*0.25), int(h*0.5))
+            right_cheek_center = (int(w*0.75), int(h*0.5))
+            cheek_radius_x = int(w * 0.15)
+            cheek_radius_y = int(h * 0.1)
+            
+            # Draw ellipses for cheeks
+            cv2.ellipse(cheek_overlay, left_cheek_center, (cheek_radius_x, cheek_radius_y), 
+                       0, 0, 360, cheek_bgr, -1)
+            cv2.ellipse(cheek_overlay, right_cheek_center, (cheek_radius_x, cheek_radius_y), 
+                       0, 0, 360, cheek_bgr, -1)
+            
+            # Create smooth mask
+            cheek_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.ellipse(cheek_mask, left_cheek_center, (cheek_radius_x, cheek_radius_y), 
+                       0, 0, 360, 255, -1)
+            cv2.ellipse(cheek_mask, right_cheek_center, (cheek_radius_x, cheek_radius_y), 
+                       0, 0, 360, 255, -1)
+            
+            # Blur mask untuk smooth edges
+            cheek_mask = cv2.GaussianBlur(cheek_mask, (51, 51), 0)
+            cheek_mask_float = cheek_mask.astype(float) / 255.0
+            cheek_mask_float = np.stack([cheek_mask_float] * 3, axis=-1)
+            
+            # Blend dengan opacity rendah
+            result = result.astype(float) * (1 - cheek_mask_float * 0.3) + \
+                    cheek_overlay.astype(float) * cheek_mask_float * 0.3
+            result = np.clip(result, 0, 255).astype(np.uint8)
+        
+        if lipstick_color:
+            # Convert hex to BGR
+            lip_hex = lipstick_color.lstrip('#')
+            lip_rgb = tuple(int(lip_hex[i:i+2], 16) for i in (0, 2, 4))
+            lip_bgr = (lip_rgb[2], lip_rgb[1], lip_rgb[0])
+            
+            # Create simple lip overlay
+            lip_overlay = np.zeros_like(image, dtype=np.uint8)
+            
+            # Define lip area (simple oval)
+            lip_center = (w // 2, int(h * 0.65))
+            lip_radius_x = int(w * 0.2)
+            lip_radius_y = int(h * 0.08)
+            
+            cv2.ellipse(lip_overlay, lip_center, (lip_radius_x, lip_radius_y), 
+                      0, 0, 360, lip_bgr, -1)
+            
+            # Create lip mask
+            lip_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.ellipse(lip_mask, lip_center, (lip_radius_x, lip_radius_y), 
+                      0, 0, 360, 255, -1)
+            
+            # Blur mask
+            lip_mask = cv2.GaussianBlur(lip_mask, (31, 31), 0)
+            lip_mask_float = lip_mask.astype(float) / 255.0
+            lip_mask_float = np.stack([lip_mask_float] * 3, axis=-1)
+            
+            # Blend dengan opacity lebih tinggi
+            result = result.astype(float) * (1 - lip_mask_float * 0.5) + \
+                    lip_overlay.astype(float) * lip_mask_float * 0.5
+            result = np.clip(result, 0, 255).astype(np.uint8)
+        
+        return result, "Color effects applied successfully"
+        
+    except Exception as e:
+        logger.error(f"Error in optimized color overlay: {str(e)}")
+        return image, f"Error applying color: {str(e)}"
+
 @app.post("/api/process-live-frame")
 async def process_live_frame(data: dict):
     """Endpoint untuk processing frame live camera dengan efek real-time"""
