@@ -3,34 +3,37 @@ import numpy as np
 import mediapipe as mp
 import logging
 import base64
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import threading
-import time
 
 logger = logging.getLogger(__name__)
 
 class LiveFaceTracker:
     def __init__(self):
-        # Initialize MediaPipe Face Mesh untuk deteksi wajah yang presisi
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,  # Lowered for better real-time performance
-            min_tracking_confidence=0.5
-        )
-        
-        # Define regions untuk pipi dan bibir yang lebih akurat
-        self.cheek_regions = self._define_cheek_regions()
-        self.lip_regions = self._define_lip_regions()
-        
-        # Cache untuk performance
-        self.last_landmarks = None
-        self.last_mask = None
-        
-        logger.info("LiveFaceTracker initialized successfully")
+        logger.info("🔄 Initializing LiveFaceTracker...")
+        try:
+            # Initialize MediaPipe Face Mesh untuk deteksi wajah yang presisi
+            self.mp_face_mesh = mp.solutions.face_mesh
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.5,  # Lowered for better real-time performance
+                min_tracking_confidence=0.5
+            )
+            
+            # Define regions untuk pipi dan bibir yang lebih akurat
+            self.cheek_regions = self._define_cheek_regions()
+            self.lip_regions = self._define_lip_regions()
+            
+            # Cache untuk performance
+            self.last_landmarks = None
+            self.last_mask = None
+            
+            logger.info("✅ LiveFaceTracker initialized successfully")
+
+        except Exception as e:
+            logger.error(f"❌ Error initializing LiveFaceTracker: {str(e)}")
+            self.face_mesh = None
+            raise
 
     def _define_cheek_regions(self):
         """Define regions untuk kulit pipi yang lebih natural"""
@@ -54,6 +57,9 @@ class LiveFaceTracker:
     def get_face_landmarks(self, image):
         """Get precise facial landmarks dengan caching untuk performance"""
         try:
+            if self.face_mesh is None:
+                return None
+                
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = self.face_mesh.process(rgb_image)
             
@@ -65,7 +71,7 @@ class LiveFaceTracker:
             return self.last_landmarks
             
         except Exception as e:
-            logger.error(f"Error in face landmarks: {str(e)}")
+            logger.error(f"❌ Error in face landmarks: {str(e)}")
             self.last_landmarks = None
             return None
 
@@ -118,7 +124,7 @@ class LiveFaceTracker:
             return mask
             
         except Exception as e:
-            logger.error(f"Error creating cheek mask: {str(e)}")
+            logger.error(f"❌ Error creating cheek mask: {str(e)}")
             return mask
 
     def create_lip_mask(self, image, landmarks):
@@ -153,7 +159,7 @@ class LiveFaceTracker:
             return mask
             
         except Exception as e:
-            logger.error(f"Error creating lip mask: {str(e)}")
+            logger.error(f"❌ Error creating lip mask: {str(e)}")
             return mask
 
     def _refine_cheek_mask(self, mask, landmarks, h, w):
@@ -176,7 +182,7 @@ class LiveFaceTracker:
                 cv2.fillConvexPoly(mask, exclusion_hull, 0)
                 
         except Exception as e:
-            logger.error(f"Error refining cheek mask: {str(e)}")
+            logger.error(f"❌ Error refining cheek mask: {str(e)}")
         
         return mask
 
@@ -216,11 +222,11 @@ class LiveFaceTracker:
             # Convert back to BGR
             result_bgr = cv2.cvtColor(result.astype(np.uint8), cv2.COLOR_RGB2BGR)
             
-            return result_bgr, "Cheek color applied naturally"
+            return result_bgr, "✅ Cheek color applied naturally"
             
         except Exception as e:
-            logger.error(f"Error applying cheek color: {str(e)}")
-            return image, f"Application error: {str(e)}"
+            logger.error(f"❌ Error applying cheek color: {str(e)}")
+            return image, f"❌ Application error: {str(e)}"
 
     def apply_lipstick(self, image, lipstick_hex):
         """Apply lipstick color dengan blending natural dan vibrant"""
@@ -258,11 +264,11 @@ class LiveFaceTracker:
             # Convert back to BGR
             result_bgr = cv2.cvtColor(result.astype(np.uint8), cv2.COLOR_RGB2BGR)
             
-            return result_bgr, "Lipstick applied naturally"
+            return result_bgr, "✅ Lipstick applied naturally"
             
         except Exception as e:
-            logger.error(f"Error applying lipstick: {str(e)}")
-            return image, f"Application error: {str(e)}"
+            logger.error(f"❌ Error applying lipstick: {str(e)}")
+            return image, f"❌ Application error: {str(e)}"
 
     def _blend_cheek_color(self, original, target_rgb, mask):
         """Advanced blending untuk cheek color yang natural seperti blush makeup"""
@@ -294,7 +300,7 @@ class LiveFaceTracker:
             return np.clip(result, 0, 255)
             
         except Exception as e:
-            logger.error(f"Error in cheek color blending: {str(e)}")
+            logger.error(f"❌ Error in cheek color blending: {str(e)}")
             return original
 
     def _blend_lipstick(self, original, target_rgb, mask):
@@ -326,7 +332,7 @@ class LiveFaceTracker:
             return np.clip(result, 0, 255)
             
         except Exception as e:
-            logger.error(f"Error in lipstick blending: {str(e)}")
+            logger.error(f"❌ Error in lipstick blending: {str(e)}")
             return original
 
     def apply_combined_effects(self, image, cheek_hex=None, lipstick_hex=None):
@@ -365,106 +371,5 @@ class LiveFaceTracker:
             return result, " | ".join(messages) if messages else "Effects applied successfully"
             
         except Exception as e:
-            logger.error(f"Error applying combined effects: {str(e)}")
-            return image, f"Combined effects error: {str(e)}"
-
-    def process_live_frame(self, frame_data, cheek_color=None, lipstick_color=None):
-        """Process live camera frame dengan efek real-time yang dioptimalkan"""
-        try:
-            # Decode base64 image
-            if isinstance(frame_data, str):
-                # Remove data URL prefix if present
-                if ',' in frame_data:
-                    frame_data = frame_data.split(',')[1]
-                
-                img_data = base64.b64decode(frame_data)
-                nparr = np.frombuffer(img_data, np.uint8)
-                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            else:
-                image = frame_data
-            
-            if image is None:
-                return None, "Invalid image data"
-            
-            # Resize image untuk performance yang lebih baik (jika terlalu besar)
-            h, w = image.shape[:2]
-            if w > 800:  # Resize jika lebar lebih dari 800px
-                scale = 800 / w
-                new_w = 800
-                new_h = int(h * scale)
-                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            
-            # Apply effects
-            if cheek_color or lipstick_color:
-                result, message = self.apply_combined_effects(image, cheek_color, lipstick_color)
-            else:
-                result, message = image, "No effects applied"
-            
-            # Encode result back to base64 dengan quality yang optimal
-            _, buffer = cv2.imencode('.jpg', result, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            result_base64 = base64.b64encode(buffer).decode('utf-8')
-            
-            return f"data:image/jpeg;base64,{result_base64}", message
-            
-        except Exception as e:
-            logger.error(f"Error processing live frame: {str(e)}")
-            # Return original image jika ada error
-            try:
-                _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                result_base64 = base64.b64encode(buffer).decode('utf-8')
-                return f"data:image/jpeg;base64,{result_base64}", f"Error: {str(e)}"
-            except:
-                return None, f"Critical error: {str(e)}"
-
-# Global instance
-live_face_tracker = LiveFaceTracker()
-
-# Flask app untuk live processing
-app = Flask(__name__)
-CORS(app)
-
-@app.route('/api/process-live-frame', methods=['POST'])
-def process_live_frame():
-    """Endpoint untuk processing frame live camera"""
-    try:
-        data = request.get_json()
-        
-        if not data or 'image' not in data:
-            return jsonify({'error': 'No image data provided'}), 400
-        
-        frame_data = data['image']
-        cheek_color = data.get('cheek_color')
-        lipstick_color = data.get('lipstick_color')
-        
-        logger.info(f"Processing frame - Cheek: {cheek_color}, Lipstick: {lipstick_color}")
-        
-        # Process frame
-        result_base64, message = live_face_tracker.process_live_frame(
-            frame_data, cheek_color, lipstick_color
-        )
-        
-        if result_base64 is None:
-            return jsonify({'error': message}), 500
-        
-        return jsonify({
-            'processed_image': result_base64,
-            'message': message
-        })
-        
-    except Exception as e:
-        logger.error(f"Error in process-live-frame endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'service': 'Live Face Tracker',
-        'timestamp': time.time()
-    })
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    logger.info("Starting Live Face Tracker server...")
-    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
+            logger.error(f"❌ Error applying combined effects: {str(e)}")
+            return image, f"❌ Combined effects error: {str(e)}"
