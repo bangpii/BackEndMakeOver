@@ -18,87 +18,103 @@ class LiveFaceTracker:
             static_image_mode=False,
             max_num_faces=1,
             refine_landmarks=True,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.7
+            min_detection_confidence=0.5,  # Lowered for better real-time performance
+            min_tracking_confidence=0.5
         )
         
-        # Define regions untuk pipi dan bibir
+        # Define regions untuk pipi dan bibir yang lebih akurat
         self.cheek_regions = self._define_cheek_regions()
         self.lip_regions = self._define_lip_regions()
         
-        # State untuk efek aktif
-        self.active_effects = {
-            "cheek_color": None,
-            "lip_color": None
-        }
+        # Cache untuk performance
+        self.last_landmarks = None
+        self.last_mask = None
         
-        # Original image storage
-        self.original_images = {}
+        logger.info("LiveFaceTracker initialized successfully")
 
     def _define_cheek_regions(self):
-        """Define regions untuk kulit pipi"""
+        """Define regions untuk kulit pipi yang lebih natural"""
         return {
-            "left_cheek": [117, 118, 119, 100, 47, 126, 209, 49, 131, 134, 51, 4, 5, 50, 101, 36, 137, 177, 123, 116],
-            "right_cheek": [346, 347, 348, 329, 277, 355, 429, 279, 360, 363, 281, 4, 5, 280, 330, 266, 366, 397, 352, 345],
-            "cheek_extension_left": [143, 111, 117, 118, 119, 100, 47, 126, 209],
-            "cheek_extension_right": [372, 340, 346, 347, 348, 329, 277, 355, 429]
+            "left_cheek": [117, 118, 119, 100, 47, 126, 209, 49, 131, 134, 51, 4, 5, 50, 101, 36, 137, 177, 123, 116, 111, 143],
+            "right_cheek": [346, 347, 348, 329, 277, 355, 429, 279, 360, 363, 281, 4, 5, 280, 330, 266, 366, 397, 352, 345, 340, 372],
+            "cheek_extension_left": [143, 111, 117, 118, 119, 100, 47, 126, 209, 129, 203, 142],
+            "cheek_extension_right": [372, 340, 346, 347, 348, 329, 277, 355, 429, 358, 423, 371]
         }
 
     def _define_lip_regions(self):
-        """Define regions untuk bibir (lipstick)"""
+        """Define regions untuk bibir (lipstick) yang lebih presisi"""
         return {
             "upper_lip": [61, 146, 91, 181, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95],
             "lower_lip": [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191],
             "lip_corners": [61, 146, 91, 181, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324],
-            "lip_outer": [61, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 78, 191, 80, 81, 82]
+            "lip_outer": [61, 84, 17, 314, 405, 320, 307, 375, 321, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 78, 191, 80, 81, 82],
+            "lip_inner": [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95]
         }
 
     def get_face_landmarks(self, image):
-        """Get precise facial landmarks"""
+        """Get precise facial landmarks dengan caching untuk performance"""
         try:
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             results = self.face_mesh.process(rgb_image)
             
             if not results.multi_face_landmarks:
+                self.last_landmarks = None
                 return None
                 
-            return results.multi_face_landmarks[0]
+            self.last_landmarks = results.multi_face_landmarks[0]
+            return self.last_landmarks
+            
         except Exception as e:
             logger.error(f"Error in face landmarks: {str(e)}")
+            self.last_landmarks = None
             return None
 
     def create_cheek_mask(self, image, landmarks):
-        """Create mask khusus untuk area pipi"""
+        """Create mask khusus untuk area pipi dengan blending natural"""
         h, w = image.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         
         try:
-            cheek_points = []
-            
             # Collect points untuk kedua pipi
-            for region_name, indices in self.cheek_regions.items():
-                for idx in indices:
-                    if idx < len(landmarks.landmark):
-                        landmark = landmarks.landmark[idx]
-                        x = int(landmark.x * w)
-                        y = int(landmark.y * h)
-                        cheek_points.append([x, y])
+            left_cheek_points = []
+            right_cheek_points = []
             
-            if len(cheek_points) > 2:
-                # Create convex hull untuk area pipi
-                hull = cv2.convexHull(np.array(cheek_points))
-                
-                # Fill the convex hull
-                cv2.fillConvexPoly(mask, hull, 255)
-                
-                # Refine mask untuk hasil yang lebih natural
-                mask = self._refine_cheek_mask(mask, landmarks, h, w)
-                
-                # Smooth the mask
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-                mask = cv2.GaussianBlur(mask, (21, 21), 5)
-                
+            # Left cheek points
+            for idx in self.cheek_regions["left_cheek"] + self.cheek_regions["cheek_extension_left"]:
+                if idx < len(landmarks.landmark):
+                    landmark = landmarks.landmark[idx]
+                    x = int(landmark.x * w)
+                    y = int(landmark.y * h)
+                    left_cheek_points.append([x, y])
+            
+            # Right cheek points
+            for idx in self.cheek_regions["right_cheek"] + self.cheek_regions["cheek_extension_right"]:
+                if idx < len(landmarks.landmark):
+                    landmark = landmarks.landmark[idx]
+                    x = int(landmark.x * w)
+                    y = int(landmark.y * h)
+                    right_cheek_points.append([x, y])
+            
+            # Create masks for both cheeks
+            if len(left_cheek_points) > 2:
+                left_hull = cv2.convexHull(np.array(left_cheek_points))
+                cv2.fillConvexPoly(mask, left_hull, 255)
+            
+            if len(right_cheek_points) > 2:
+                right_hull = cv2.convexHull(np.array(right_cheek_points))
+                cv2.fillConvexPoly(mask, right_hull, 255)
+            
+            # Refine mask untuk hasil yang lebih natural
+            mask = self._refine_cheek_mask(mask, landmarks, h, w)
+            
+            # Smooth the mask untuk blending yang natural
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            mask = cv2.GaussianBlur(mask, (31, 31), 7)
+            
+            # Adjust opacity untuk efek blush yang natural
+            mask = cv2.addWeighted(mask, 0.6, np.zeros_like(mask), 0.4, 0)
+            
             return mask
             
         except Exception as e:
@@ -106,14 +122,14 @@ class LiveFaceTracker:
             return mask
 
     def create_lip_mask(self, image, landmarks):
-        """Create mask khusus untuk area bibir"""
+        """Create mask khusus untuk area bibir dengan presisi tinggi"""
         h, w = image.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         
         try:
             lip_points = []
             
-            # Collect points untuk bibir
+            # Collect points untuk semua area bibir
             for region_name, indices in self.lip_regions.items():
                 for idx in indices:
                     if idx < len(landmarks.landmark):
@@ -130,9 +146,9 @@ class LiveFaceTracker:
                 cv2.fillConvexPoly(mask, hull, 255)
                 
                 # Smooth the mask untuk hasil lipstick yang natural
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                mask = cv2.morphologyEx(mask, cv2.CLOSE, kernel)
-                mask = cv2.GaussianBlur(mask, (11, 11), 3)
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                mask = cv2.GaussianBlur(mask, (15, 15), 3)
                 
             return mask
             
@@ -165,12 +181,15 @@ class LiveFaceTracker:
         return mask
 
     def apply_cheek_color(self, image, cheek_hex):
-        """Apply blush/cheek color dengan blending natural"""
+        """Apply blush/cheek color dengan blending natural seperti makeup sungguhan"""
         try:
+            if not cheek_hex:
+                return image, "No cheek color provided"
+                
             # Convert hex to RGB
             cheek_hex = cheek_hex.lstrip('#')
             if len(cheek_hex) != 6:
-                return image, "Invalid cheek color"
+                return image, "Invalid cheek color format"
                 
             target_rgb = tuple(int(cheek_hex[i:i+2], 16) for i in (0, 2, 4))
             
@@ -189,7 +208,6 @@ class LiveFaceTracker:
             
             # Create high-quality mask for blending
             mask_float = cheek_mask.astype(float) / 255.0
-            mask_float = cv2.GaussianBlur(mask_float, (25, 25), 7)
             mask_float = np.stack([mask_float] * 3, axis=-1)
             
             # Apply cheek color dengan blending yang natural
@@ -205,12 +223,15 @@ class LiveFaceTracker:
             return image, f"Application error: {str(e)}"
 
     def apply_lipstick(self, image, lipstick_hex):
-        """Apply lipstick color dengan blending natural"""
+        """Apply lipstick color dengan blending natural dan vibrant"""
         try:
+            if not lipstick_hex:
+                return image, "No lipstick color provided"
+                
             # Convert hex to RGB
             lipstick_hex = lipstick_hex.lstrip('#')
             if len(lipstick_hex) != 6:
-                return image, "Invalid lipstick color"
+                return image, "Invalid lipstick color format"
                 
             target_rgb = tuple(int(lipstick_hex[i:i+2], 16) for i in (0, 2, 4))
             
@@ -229,7 +250,6 @@ class LiveFaceTracker:
             
             # Create high-quality mask for blending
             mask_float = lip_mask.astype(float) / 255.0
-            mask_float = cv2.GaussianBlur(mask_float, (9, 9), 2)
             mask_float = np.stack([mask_float] * 3, axis=-1)
             
             # Apply lipstick dengan blending yang natural
@@ -245,27 +265,30 @@ class LiveFaceTracker:
             return image, f"Application error: {str(e)}"
 
     def _blend_cheek_color(self, original, target_rgb, mask):
-        """Advanced blending untuk cheek color yang natural seperti blush"""
+        """Advanced blending untuk cheek color yang natural seperti blush makeup"""
         try:
             result = original.copy()
             
-            # Buat cheek color layer dengan opacity yang natural
+            # Buat cheek color layer dengan variasi opacity
             cheek_layer = np.ones_like(original)
             cheek_layer[:, :, 0] = target_rgb[0]  # R
             cheek_layer[:, :, 1] = target_rgb[1]  # G  
             cheek_layer[:, :, 2] = target_rgb[2]  # B
             
-            # Soft light blending untuk efek natural
+            # Soft light blending untuk efek natural seperti blush
             for c in range(3):
                 original_channel = original[:, :, c]
                 cheek_channel = cheek_layer[:, :, c]
                 
-                # Soft light blending formula
+                # Enhanced soft light blending
                 blended = np.where(original_channel < 128, 
                                  (2 * original_channel * cheek_channel) / 255,
                                  255 - 2 * (255 - original_channel) * (255 - cheek_channel) / 255)
                 
-                # Apply dengan mask
+                # Reduce intensity untuk efek yang lebih subtle
+                blended = original_channel * 0.7 + blended * 0.3
+                
+                # Apply dengan mask yang smooth
                 result[:, :, c] = original_channel * (1 - mask[:, :, c]) + blended * mask[:, :, c]
             
             return np.clip(result, 0, 255)
@@ -279,20 +302,23 @@ class LiveFaceTracker:
         try:
             result = original.copy()
             
-            # Buat lipstick layer
+            # Buat lipstick layer dengan enhanced color
             lipstick_layer = np.ones_like(original)
             lipstick_layer[:, :, 0] = target_rgb[0]  # R
             lipstick_layer[:, :, 1] = target_rgb[1]  # G  
             lipstick_layer[:, :, 2] = target_rgb[2]  # B
             
-            # Color burn blending untuk lipstick yang vibrant
+            # Enhanced color burn blending untuk lipstick yang vibrant
             for c in range(3):
                 original_channel = original[:, :, c]
                 lipstick_channel = lipstick_layer[:, :, c]
                 
-                # Color burn blending
-                blended = 255 - (255 - original_channel) / (lipstick_channel + 1e-6) * 255
+                # Color burn dengan enhancement
+                blended = 255 - (255 - original_channel) / (lipstick_channel / 255.0 + 1e-6)
                 blended = np.clip(blended, 0, 255)
+                
+                # Tambahkan sedikit original color untuk natural look
+                blended = blended * 0.8 + original_channel * 0.2
                 
                 # Apply dengan mask
                 result[:, :, c] = original_channel * (1 - mask[:, :, c]) + blended * mask[:, :, c]
@@ -304,29 +330,46 @@ class LiveFaceTracker:
             return original
 
     def apply_combined_effects(self, image, cheek_hex=None, lipstick_hex=None):
-        """Apply both cheek color and lipstick effects"""
+        """Apply both cheek color and lipstick effects dengan optimasi performance"""
         try:
             result = image.copy()
             messages = []
             
+            # Cek jika ada efek yang perlu diaplikasikan
+            if not cheek_hex and not lipstick_hex:
+                return result, "No effects to apply"
+            
+            # Get landmarks sekali saja untuk kedua efek
+            landmarks = self.get_face_landmarks(image)
+            if not landmarks:
+                return result, "No face detected"
+            
             # Apply cheek color jika ada
             if cheek_hex:
-                result, cheek_msg = self.apply_cheek_color(result, cheek_hex)
-                messages.append(cheek_msg)
+                temp_result, cheek_msg = self.apply_cheek_color(result, cheek_hex)
+                if "applied" in cheek_msg.lower():
+                    result = temp_result
+                    messages.append("Cheek color applied")
+                else:
+                    messages.append(f"Cheek: {cheek_msg}")
             
             # Apply lipstick jika ada
             if lipstick_hex:
-                result, lip_msg = self.apply_lipstick(result, lipstick_hex)
-                messages.append(lip_msg)
+                temp_result, lip_msg = self.apply_lipstick(result, lipstick_hex)
+                if "applied" in lip_msg.lower():
+                    result = temp_result
+                    messages.append("Lipstick applied")
+                else:
+                    messages.append(f"Lipstick: {lip_msg}")
             
-            return result, " | ".join(messages) if messages else "No effects applied"
+            return result, " | ".join(messages) if messages else "Effects applied successfully"
             
         except Exception as e:
             logger.error(f"Error applying combined effects: {str(e)}")
             return image, f"Combined effects error: {str(e)}"
 
     def process_live_frame(self, frame_data, cheek_color=None, lipstick_color=None):
-        """Process live camera frame dengan efek real-time"""
+        """Process live camera frame dengan efek real-time yang dioptimalkan"""
         try:
             # Decode base64 image
             if isinstance(frame_data, str):
@@ -343,21 +386,35 @@ class LiveFaceTracker:
             if image is None:
                 return None, "Invalid image data"
             
+            # Resize image untuk performance yang lebih baik (jika terlalu besar)
+            h, w = image.shape[:2]
+            if w > 800:  # Resize jika lebar lebih dari 800px
+                scale = 800 / w
+                new_w = 800
+                new_h = int(h * scale)
+                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
             # Apply effects
             if cheek_color or lipstick_color:
                 result, message = self.apply_combined_effects(image, cheek_color, lipstick_color)
             else:
                 result, message = image, "No effects applied"
             
-            # Encode result back to base64
-            _, buffer = cv2.imencode('.jpg', result, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Encode result back to base64 dengan quality yang optimal
+            _, buffer = cv2.imencode('.jpg', result, [cv2.IMWRITE_JPEG_QUALITY, 80])
             result_base64 = base64.b64encode(buffer).decode('utf-8')
             
-            return result_base64, message
+            return f"data:image/jpeg;base64,{result_base64}", message
             
         except Exception as e:
             logger.error(f"Error processing live frame: {str(e)}")
-            return None, f"Processing error: {str(e)}"
+            # Return original image jika ada error
+            try:
+                _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                result_base64 = base64.b64encode(buffer).decode('utf-8')
+                return f"data:image/jpeg;base64,{result_base64}", f"Error: {str(e)}"
+            except:
+                return None, f"Critical error: {str(e)}"
 
 # Global instance
 live_face_tracker = LiveFaceTracker()
@@ -379,6 +436,8 @@ def process_live_frame():
         cheek_color = data.get('cheek_color')
         lipstick_color = data.get('lipstick_color')
         
+        logger.info(f"Processing frame - Cheek: {cheek_color}, Lipstick: {lipstick_color}")
+        
         # Process frame
         result_base64, message = live_face_tracker.process_live_frame(
             frame_data, cheek_color, lipstick_color
@@ -388,7 +447,7 @@ def process_live_frame():
             return jsonify({'error': message}), 500
         
         return jsonify({
-            'processed_image': f"data:image/jpeg;base64,{result_base64}",
+            'processed_image': result_base64,
             'message': message
         })
         
@@ -396,5 +455,16 @@ def process_live_frame():
         logger.error(f"Error in process-live-frame endpoint: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'Live Face Tracker',
+        'timestamp': time.time()
+    })
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    logging.basicConfig(level=logging.INFO)
+    logger.info("Starting Live Face Tracker server...")
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
