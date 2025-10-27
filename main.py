@@ -313,6 +313,152 @@ async def analyze_skin(file: UploadFile = File(...)):
         logger.error(f"Error in analyze-skin endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+# ========== TAMBAHAN ENDPOINT UNTUK LIVE CAMERA PROCESSING ==========
+
+@app.post("/api/process-live-frame")
+async def process_live_frame(data: dict):
+    """Endpoint untuk processing frame live camera dengan efek real-time"""
+    try:
+        if not data or 'image' not in data:
+            raise HTTPException(status_code=400, detail="No image data provided")
+        
+        frame_data = data.get('image')
+        cheek_color = data.get('cheek_color')
+        lipstick_color = data.get('lipstick_color')
+        
+        logger.info(f"Processing live frame - Cheek: {cheek_color}, Lipstick: {lipstick_color}")
+        
+        # Decode base64 image
+        if ',' in frame_data:
+            frame_data = frame_data.split(',')[1]
+        
+        img_data = base64.b64decode(frame_data)
+        nparr = np.frombuffer(img_data, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise HTTPException(status_code=400, detail="Invalid image data")
+        
+        # Resize image untuk performance yang lebih baik
+        h, w = image.shape[:2]
+        if w > 800:
+            scale = 800 / w
+            new_w = 800
+            new_h = int(h * scale)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # Apply effects jika ada warna yang dipilih
+        result_image = image.copy()
+        messages = []
+        
+        if cheek_color or lipstick_color:
+            # Apply cheek color jika ada
+            if cheek_color:
+                cheek_result, cheek_msg = skin_tracker.apply_cheek_color(image, cheek_color)
+                if "applied" in cheek_msg.lower():
+                    result_image = cheek_result
+                    messages.append("Cheek color applied")
+                else:
+                    messages.append(f"Cheek: {cheek_msg}")
+            
+            # Apply lipstick jika ada
+            if lipstick_color:
+                lip_result, lip_msg = skin_tracker.apply_lipstick(result_image, lipstick_color)
+                if "applied" in lip_msg.lower():
+                    result_image = lip_result
+                    messages.append("Lipstick applied")
+                else:
+                    messages.append(f"Lipstick: {lip_msg}")
+        
+        # Encode result back to base64
+        result_base64 = image_to_base64(result_image)
+        if not result_base64:
+            raise HTTPException(status_code=500, detail="Failed to process image")
+        
+        return {
+            "success": True,
+            "processed_image": f"data:image/jpeg;base64,{result_base64}",
+            "message": " | ".join(messages) if messages else "Frame processed successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in process-live-frame endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/api/apply-cheek-color")
+async def apply_cheek_color(
+    file: UploadFile = File(...),
+    cheek_hex: str = Form(...),
+    session_id: str = Form(None)
+):
+    """Endpoint khusus untuk apply cheek color"""
+    try:
+        contents = await file.read()
+        
+        if len(contents) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large")
+            
+        nparr = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        # Apply cheek color
+        result_image, message = skin_tracker.apply_cheek_color(image, cheek_hex)
+        
+        result_base64 = image_to_base64(result_image)
+        if not result_base64:
+            raise HTTPException(status_code=500, detail="Failed to process image")
+        
+        return {
+            "success": True,
+            "message": message,
+            "processed_image": f"data:image/jpeg;base64,{result_base64}",
+            "applied_cheek_color": cheek_hex
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in apply-cheek-color endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/api/apply-lipstick")
+async def apply_lipstick(
+    file: UploadFile = File(...),
+    lipstick_hex: str = Form(...),
+    session_id: str = Form(None)
+):
+    """Endpoint khusus untuk apply lipstick"""
+    try:
+        contents = await file.read()
+        
+        if len(contents) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large")
+            
+        nparr = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        # Apply lipstick
+        result_image, message = skin_tracker.apply_lipstick(image, lipstick_hex)
+        
+        result_base64 = image_to_base64(result_image)
+        if not result_base64:
+            raise HTTPException(status_code=500, detail="Failed to process image")
+        
+        return {
+            "success": True,
+            "message": message,
+            "processed_image": f"data:image/jpeg;base64,{result_base64}",
+            "applied_lipstick": lipstick_hex
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in apply-lipstick endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 @app.get("/api/sessions")
 async def get_sessions():
     """Debug endpoint to check active sessions"""
